@@ -1,0 +1,16 @@
+Generated with the built-in image_gen.imagegen tool on 2026-10-14.
+Transparent background requested; the generated alpha is preserved.
+The master is 1254×1254 pixels. scripts/generate-icon.swift only resizes it to the ten macOS AppIcon sizes, including 1024×1024.
+No reference images, provider trademarks, or text were used.
+
+Final generation prompt:
+
+Use case: logo-brand.
+Asset type: native macOS app icon for AgentSwap, a calm account-switching utility.
+Primary request: a polished, distinctive icon built around two broad interlocking swap arrows, one pointing right and one pointing left, immediately recognizable at small Dock and menu sizes.
+Scene/backdrop: genuine transparent background outside the icon plate.
+Style/medium: restrained macOS icon rendering with softly sculpted glass depth, crisp silhouettes, refined edges, gentle realistic highlights, and generous negative space.
+Composition/framing: square 1024 by 1024 canvas. One centered rounded-square macOS icon plate occupies about 86% of the canvas width and height, with balanced transparent margins. The two arrows form one simple bold central symbol, with clear space between them.
+Color palette: a deep forest-green plate, warm cream and softly muted coral arrows. Keep the palette quiet and coherent.
+Lighting/mood: soft top-left studio light and subtle depth. The arrow colors must remain clear and legible, with only a light glass sheen.
+Constraints: clean geometry; large simple forms; transparent outside the rounded plate; no text, letters, numbers, watermark, provider logos or trademarks; no surrounding UI, no chrome, no decorative particles, no busy background. The icon should feel composed, native, and easy to identify at 16 pixels.

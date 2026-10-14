@@ -1,0 +1,158 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000011 /* AgentSwapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000001 /* AgentSwapApp.swift */; };
+		A00000000000000000000012 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* DashboardView.swift */; };
+		A00000000000000000000013 /* AccountCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000003 /* AccountCard.swift */; };
+		A00000000000000000000014 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000004 /* MenuBarView.swift */; };
+		A00000000000000000000015 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000005 /* SettingsView.swift */; };
+		A00000000000000000000016 /* SharedStyles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000006 /* SharedStyles.swift */; };
+		A00000000000000000000017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000007 /* Assets.xcassets */; };
+		A00000000000000000000018 /* AgentSwapCore in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000060 /* AgentSwapCore */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A00000000000000000000001 /* AgentSwapApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSwapApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000002 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		A00000000000000000000003 /* AccountCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCard.swift; sourceTree = "<group>"; };
+		A00000000000000000000004 /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
+		A00000000000000000000005 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A00000000000000000000006 /* SharedStyles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStyles.swift; sourceTree = "<group>"; };
+		A00000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A00000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000009 /* AgentSwap.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AgentSwap.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A0000000000000000000000A /* AgentSwapCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = AgentSwapCore; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000018 /* AgentSwapCore in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000030 = {
+			isa = PBXGroup;
+			children = (A00000000000000000000031 /* AgentSwapApp */, A0000000000000000000000A /* AgentSwapCore */, A00000000000000000000032 /* Products */,);
+			sourceTree = "<group>";
+		};
+		A00000000000000000000031 /* AgentSwapApp */ = {
+			isa = PBXGroup;
+			children = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A00000000000000000000007, A00000000000000000000008,);
+			path = AgentSwapApp;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000032 /* Products */ = {isa = PBXGroup; children = (A00000000000000000000009 /* AgentSwap.app */,); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000000000000000000040 /* AgentSwap */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000071 /* Build configuration list for PBXNativeTarget AgentSwap */;
+			buildPhases = (A00000000000000000000020 /* Sources */, A00000000000000000000021 /* Frameworks */, A00000000000000000000022 /* Resources */,);
+			buildRules = ();
+			dependencies = ();
+			name = AgentSwap;
+			packageProductDependencies = (A00000000000000000000060 /* AgentSwapCore */,);
+			productName = AgentSwap;
+			productReference = A00000000000000000000009 /* AgentSwap.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000050 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = YES; LastSwiftUpdateCheck = 2700; LastUpgradeCheck = 2700; TargetAttributes = {A00000000000000000000040 = {CreatedOnToolsVersion = 27.0; }; }; };
+			buildConfigurationList = A00000000000000000000070 /* Build configuration list for PBXProject */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = ko;
+			hasScannedForEncodings = 0;
+			knownRegions = (ko, en, Base,);
+			mainGroup = A00000000000000000000030;
+			packageReferences = (A00000000000000000000061 /* XCLocalSwiftPackageReference AgentSwapCore */,);
+			productRefGroup = A00000000000000000000032 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A00000000000000000000040 /* AgentSwap */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000017 /* Assets.xcassets in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000080 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_STRICT_OBJC_MSGSEND = YES; GCC_C_LANGUAGE_STANDARD = gnu17; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; SWIFT_STRICT_CONCURRENCY = complete; }; name = Debug; };
+		A00000000000000000000081 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; ENABLE_STRICT_OBJC_MSGSEND = YES; GCC_C_LANGUAGE_STANDARD = gnu17; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; SWIFT_STRICT_CONCURRENCY = complete; }; name = Release; };
+		A00000000000000000000082 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AgentSwapApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks",);
+				MARKETING_VERSION = 1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = net.mercen.agentswap;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A00000000000000000000083 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AgentSwapApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks",);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = net.mercen.agentswap;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000070 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000080 /* Debug */, A00000000000000000000081 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A00000000000000000000071 /* Build configuration list for PBXNativeTarget AgentSwap */ = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000082 /* Debug */, A00000000000000000000083 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A00000000000000000000061 /* XCLocalSwiftPackageReference AgentSwapCore */ = {isa = XCLocalSwiftPackageReference; relativePath = AgentSwapCore; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A00000000000000000000060 /* AgentSwapCore */ = {isa = XCSwiftPackageProductDependency; productName = AgentSwapCore; };
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A00000000000000000000050 /* Project object */;
+}

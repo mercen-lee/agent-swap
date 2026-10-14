@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentSwap"
+  short_description: "Develop and verify AgentSwap’s native macOS app safely"
+  default_prompt: "Use $agentswap-dev to implement and verify this AgentSwap change."

@@ -1,0 +1,44 @@
+---
+name: agentswap-dev
+description: "Implement, review, or verify AgentSwap’s Swift macOS account manager, including provider compatibility, credential transactions, polling, account switching, and native UI. Use for work in this repository."
+---
+
+# AgentSwap 개발
+
+이 저장소의 비밀 정보 없는 fixture와 실제 제공자 인증 경계를 구분하면서 요청한 기능을 구현하고 검증합니다. 먼저 [AGENTS.md](../../../AGENTS.md)를 읽고 현재 diff와 관련 구현을 확인합니다. 사용자의 요청은 이 skill보다 우선하며, skill 적용은 실계정 변경이나 공개 권한을 추가하지 않습니다.
+
+## 변경에 맞는 경로
+
+필요한 경로만 읽습니다. 현재 구현의 한계를 새 요구사항의 완료 기준으로 축소하지 않습니다.
+
+| 변경 | 먼저 볼 구현·문서 | 관련 테스트 |
+|---|---|---|
+| 제공자 API·파싱·로그인 | `ProvidersHTTP.swift`, `ProvidersParsing.swift`, `ProvidersLogin.swift`, `ProvidersAdapters.swift` | `ProviderTests`, `ClaudeReadBindingTests`, `ClaudePartialMetadataRotationTests` |
+| Claude 인증·Keychain·회전 | `ClaudeKeychainAccess.swift`, `StorageClaude.swift`, `StorageTransactions.swift`; 구조 문서의 저장소·토큰 절 | `ClaudeNativeKeychainTests`, `ClaudeNativeEncodingTests`, `ClaudeRotationRecoveryTests`, `ClaudeCredentialRetentionTests` |
+| Codex 저장소·재실행 | `ProvidersAdapters.swift`, `AppModel.swift`, `StorageCodex.swift`, `StorageCodexConfiguration.swift`, `ProvidersProcesses.swift`; 구조 문서의 프로세스 경계 | `StorageTests`, `CodexSwitchBoundaryTests`, `CodexQuitRotationTests`, `SourceBackupRegistrationTests` |
+| 스케줄러·캐시·자동 전환 | `AppModel.swift`, `AccountOperationQueue.swift`, `AutomaticSwitchPolicy.swift`, `Models.swift` | `EngineTests`, `AutomaticSwitchTests`, `PendingCredentialPersistenceTests` |
+| Claude 로컬 Code 목록 | `ClaudeDesktopSessionPreserver.swift`, `ClaudeDesktopProcesses.swift`; 구조 문서의 세션 보존 | `ClaudeDesktopSessionPreserverTests`, `EngineSessionPreservationTests` |
+| SwiftUI·앱 수명 | `AgentSwapApp/`, [디자인 기준](../../../docs/DESIGN.md) | 관련 Core fixture, 데모 UI와 접근성 확인 |
+
+Core 파일은 `AgentSwapCore/Sources/AgentSwapCore/`, 테스트는 `AgentSwapCore/Tests/AgentSwapCoreTests/` 아래에 있습니다. 저장소·프로세스 변경에는 [ARCHITECTURE.md](../../../docs/ARCHITECTURE.md), 완료 주장에는 [VALIDATION.md](../../../docs/VALIDATION.md)를 확인합니다.
+
+## 기능 수정과 호환성 조사
+
+1. 변경할 동작의 현재 호출 경로와 합성 fixture를 확인합니다. 제공자 응답·인증 형식의 변경은 공식 문서 또는 해당 설치 버전의 공개 소스로 검증하고 불확실성을 기록합니다.
+2. 새 필드·토큰 회전·부분 실패·취소·외부 인증 변경 중 영향을 받는 경계를 찾습니다. fixture는 실제 인증을 복사하지 말고 합성 값과 임시 저장소로 만듭니다.
+3. 새 OAuth 응답을 다시 교환하지 않도록 첫 영구 저장 실패까지 처리하고, 원본 세대와 복구 자료를 쓰기 직전에 재확인합니다. 잠금과 읽기 오류를 로그아웃으로 취급하지 않습니다.
+4. 관련 suite를 실행합니다. 공통 저장소·동시성·전환 경계 변경은 전체 Core 테스트와 앱 컴파일까지 확인합니다. 문서 수정은 링크·명령·diff 검사로 충분합니다.
+
+Claude 네이티브 저장 명령은 현재 4094바이트이며 hex 인코딩 때문에 공유 인증을 포함한 실제 크기는 약 2 KiB입니다. 이 제한을 수정할 때 비밀 argv·평문 파일·공유 필드 삭제로 대체하지 말고 CLI가 같은 인증을 읽는다는 증거와 정확한 복원 경로를 확보합니다. Swift SDK의 자체 읽기 성공만으로 Claude CLI 호환성을 판단하지 않습니다.
+
+## UI와 실제 검증
+
+UI는 공유 `AppModel`, 표준 탐색·목록·Form·툴바, 의미 기반 색과 시스템 시간대를 사용합니다. 데이터 표면에 장식용 Glass를 추가하지 않습니다. 새 API는 macOS 14 fallback을 유지합니다.
+
+UI 확인에는 `build/AgentSwap.app`의 `--demo` 모드와 메모리 계정을 사용합니다. 실제 모드와 데모를 전환할 때는 앱을 정상 종료합니다. 실제 계정의 스크린샷·응답·프로세스 인자를 문서에 저장하지 않습니다. 앱 재빌드의 ad-hoc 서명 변경은 Keychain 재승인을 유발할 수 있으므로 문서 작업에 앱 교체를 연결하지 않습니다.
+
+Codex 재실행 검증은 현재 작업을 호스팅하는 데스크톱까지 종료할 수 있습니다. 사용자와 준비된 검증 순서를 확인하고 정상 종료·소비자 종료·최신 백업·대상 적용·재실행·로그인과 사용량 확인을 각각 기록합니다. 두 번째 구독 계정이 없으면 두 계정 검증은 미완료로 남깁니다. Claude CLI 전환이나 로컬 목록 준비는 Claude 데스크톱의 로그인 변경·기존 대화 이어쓰기 성공을 뜻하지 않습니다.
+
+## 전달
+
+[기여 안내](../../../CONTRIBUTING.md)의 명령을 사용하고, 요청한 동작·검증 결과·남은 한계를 간결하게 보고합니다. 재현 가능한 소스·합성 fixture·문서만 Git에 포함합니다. 공개 준비에서는 ignore 규칙과 현재 index를 모두 검사합니다.

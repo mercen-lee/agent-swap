@@ -1,0 +1,48 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Xcode / SwiftPM build output and personal workspace state
+.build/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+*.xcactivitylog
+*.xcresult/
+**/.swiftpm/configuration/registries.json
+**/.swiftpm/security/
+**/.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+
+# Root-level release and signing artifacts; public certificates and source entitlements stay visible
+/*.app/
+/*.dSYM/
+/*.xcarchive/
+/*.dmg
+/*.pkg
+/*.p12
+/*.pfx
+/*.mobileprovision
+/*.provisionprofile
+/*.key
+/*.pem
+/*.keychain
+/*.keychain-db
+
+# Local secrets and copied provider / application state (not test fixtures)
+/.env
+/.env.*
+!/.env.example
+!/.env.sample
+!/.env.template
+/.claude/
+/.codex/
+/.claude.json
+/.credentials.json
+/auth.json
+/state.json
+/instance.lock
+/Library/Application Support/AgentSwap/
+/Library/Application Support/Claude/
