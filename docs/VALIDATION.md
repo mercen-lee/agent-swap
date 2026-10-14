@@ -19,7 +19,7 @@
 
 ## 재현 명령
 
-전체 Xcode를 사용합니다. Command Line Tools만 선택된 환경에서는 Swift Testing 모듈이 없을 수 있습니다. 앱 빌드에는 Xcode 26 이상과 macOS SDK 26 이상이 필요합니다.
+전체 Xcode를 사용합니다. Command Line Tools만 선택된 환경에서는 Swift Testing 모듈이 없을 수 있습니다. 현재 앱 Release 빌드는 Xcode 27과 macOS SDK 27로 검증합니다.
 
 ```sh
 ./scripts/test-core.sh
@@ -37,7 +37,7 @@ Core **252개 테스트·20개 스위트 통과**, Release **BUILD SUCCEEDED**, 
 
 저장소 준비 과정에서도 새 `scripts/test-core.sh`로 252개·20개 스위트가 통과했습니다. 전용 skill·CI YAML·내부 문서 링크·shell 문법·ignore 규칙과 index의 비밀 정보 후보 검사를 통과했습니다. 기본 앱을 교체하거나 인증을 변경하지 않았습니다.
 
-첫 GitHub CI는 Core 빌드를 완료했지만 테스트 실행이 끝나지 않고 작업의 20분 제한 부근에서 취소됐습니다. 별도 strict cooperative pool 실행에서 Codex 취소 fixture의 동기 대기로 테스트가 정체되는 문제를 재현했습니다. 취소·해제 제어를 독립 Dispatch 실행기로 옮기고 대기에 상한과 실패 assertion을 추가했으며 기존 병렬화·인증 보존 검증은 유지했습니다. 수정 후 관련 9개 테스트가 strict·일반 실행 모두 통과했고, 전체 252개·20개 스위트도 일반 2.973초·strict 3.502초에 통과했습니다. 이 로컬 재현을 첫 원격 실행의 유일한 원인으로 단정하지 않으며 수정본의 원격 CI 결과를 별도로 확인합니다.
+첫 GitHub CI는 Core 빌드를 완료했지만 테스트 실행이 끝나지 않고 작업의 20분 제한 부근에서 취소됐습니다. 별도 strict cooperative pool 실행에서 Codex 취소 fixture의 동기 대기로 테스트가 정체되는 문제를 재현했습니다. 취소·해제 제어를 독립 Dispatch 실행기로 옮기고 대기에 상한과 실패 assertion을 추가했으며 기존 병렬화·인증 보존 검증은 유지했습니다. 수정 후 관련 9개 테스트가 strict·일반 실행 모두 통과했고, 전체 252개·20개 스위트도 일반 2.973초·strict 3.502초에 통과했습니다. 이 로컬 재현을 첫 원격 실행의 유일한 원인으로 단정하지 않으며 수정본의 원격 CI에서 Core 테스트 통과를 확인했습니다. 이어진 앱 Release 빌드는 Xcode 26.6·Swift 6.3.3의 컴파일러 내부 IR 생성 중 충돌했습니다. 따라서 CI와 릴리즈 workflow를 로컬 Universal 빌드가 통과한 Xcode 27 도구로 맞췄으며, macOS 실행 최소 버전 14.0은 유지합니다. 다른 앱 빌드 도구의 호환성은 확인하지 않았습니다.
 
 Fixture는 합성 인증, 임시 디렉터리, 주입한 HTTP·Keychain·프로세스 제어를 사용합니다. 테스트를 실행하기 위해 실제 계정에 로그인할 필요는 없습니다.
 

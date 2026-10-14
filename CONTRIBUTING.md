@@ -4,7 +4,7 @@ AgentSwap은 아직 개발 중입니다. [README](README.md)에서 기능과 현
 
 ## 개발 환경
 
-- macOS와 Xcode 26 이상. 전체 앱에는 macOS SDK 26 이상이 필요합니다.
+- macOS와 Xcode 27 이상. 현재 앱 Release 빌드는 macOS SDK 27로 검증합니다.
 - Swift 6 언어 모드. 실행 배포 대상은 macOS 14 이상입니다.
 - 실제 로그인에는 공식 Claude Code·Codex CLI가 필요하며 fixture 테스트에는 필요하지 않습니다.
 

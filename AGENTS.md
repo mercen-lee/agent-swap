@@ -29,7 +29,7 @@ AgentSwap은 Claude Code·Codex 구독 계정 관리자입니다. macOS 14 이�
 
 ## 검증과 실행
 
-Xcode 26 이상과 macOS SDK 26 이상으로 빌드합니다. 앱의 배포 대상은 macOS 14이며 Liquid Glass는 availability로 분기합니다. Command Line Tools만 선택하면 Swift Testing 모듈을 찾지 못할 수 있습니다.
+앱은 검증된 Xcode 27 이상과 macOS SDK 27 이상으로 빌드합니다. 앱의 배포 대상은 macOS 14이며 Liquid Glass는 availability로 분기합니다. Command Line Tools만 선택하면 Swift Testing 모듈을 찾지 못할 수 있습니다.
 
 ```sh
 ./scripts/test-core.sh

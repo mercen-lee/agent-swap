@@ -48,10 +48,10 @@ AGENTSWAP_RELEASE_TOUCH_TIME="$(TZ=UTC /bin/date -r "$AGENTSWAP_RELEASE_EPOCH" +
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 AGENTSWAP_XCODE_VERSION="$(/usr/bin/xcodebuild -version)" || fail "Select a full Xcode installation with DEVELOPER_DIR."
 [[ "$AGENTSWAP_XCODE_VERSION" =~ '^Xcode ([0-9]+)' ]] || fail "Cannot determine the Xcode version."
-(( match[1] >= 26 )) || fail "Xcode 26 or later is required."
+(( match[1] >= 27 )) || fail "Xcode 27 or later is required for the supported release toolchain."
 AGENTSWAP_SDK_VERSION="$(/usr/bin/xcrun --sdk macosx --show-sdk-version)"
 AGENTSWAP_SDK_MAJOR="${AGENTSWAP_SDK_VERSION%%.*}"
-[[ "$AGENTSWAP_SDK_MAJOR" =~ '^[0-9]+$' ]] && (( AGENTSWAP_SDK_MAJOR >= 26 )) || fail "macOS SDK 26 or later is required."
+[[ "$AGENTSWAP_SDK_MAJOR" =~ '^[0-9]+$' ]] && (( AGENTSWAP_SDK_MAJOR >= 27 )) || fail "macOS SDK 27 or later is required for the supported release toolchain."
 
 for AGENTSWAP_DIRECTORY in "$AGENTSWAP_ROOT/build" "$AGENTSWAP_RELEASE_WORK_ROOT" "$AGENTSWAP_RELEASE_OUTPUT_ROOT"; do
     [[ ! -L "$AGENTSWAP_DIRECTORY" ]] || fail "A release output directory cannot be a symlink."

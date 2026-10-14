@@ -27,7 +27,7 @@ Claude Code와 Codex의 여러 구독 계정을 관리하는 macOS 네이티브 
 | 구분 | 요구사항 |
 |---|---|
 | 앱 실행 | macOS 14 이상 |
-| 앱 빌드 | macOS 26 SDK 이상을 포함한 Xcode 26 이상, Swift 6 |
+| 앱 빌드 | macOS 27 SDK를 포함한 Xcode 27 이상, Swift 6 |
 | 새 계정 로그인 | 해당 제공자의 공식 CLI와 구독 계정 |
 | 지원 프로필 | 기본 로컬 프로필의 구독 로그인 |
 
