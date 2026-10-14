@@ -29,8 +29,15 @@ actor FakeProvider: ProviderAdapter {
     var activationCount = 0
     var refreshTokens: [String] = []
     var currentBeforeNextBackup: ImportedAccount?
+    var compatibilityStatus: CompatibilityStatus = .supported("fixture")
+    var compatibilityChecks = 0
+    var compatibilityModes: [KeychainInteractionMode] = []
     init(_ imported: ImportedAccount) { self.imported = imported; provider = imported.account.provider }
-    func compatibility() -> CompatibilityStatus { .supported("fixture") }
+    func compatibility() -> CompatibilityStatus {
+        compatibilityChecks += 1
+        compatibilityModes.append(KeychainInteraction.mode)
+        return compatibilityStatus
+    }
     func importCurrent() -> ImportedAccount { imported }
     func login() -> ImportedAccount {
         let result = loginResult ?? imported
@@ -73,6 +80,7 @@ actor FakeProvider: ProviderAdapter {
         loginResult = value; self.currentAfterLogin = currentAfterLogin
     }
     func setCurrentBeforeBackup(_ value: ImportedAccount) { currentBeforeNextBackup = value }
+    func setCompatibility(_ value: CompatibilityStatus) { compatibilityStatus = value }
 }
 
 @Suite("공유 엔진") @MainActor

@@ -32,6 +32,11 @@ struct MenuBarView: View {
                 }
                 Text(model.loggingInProvider == .claude ? "브라우저 인증 코드 입력은 대시보드에서 진행하세요." : "브라우저에서 로그인을 완료해주세요.")
                     .font(.caption).foregroundStyle(.secondary)
+                Button("로그인 페이지 다시 열기", systemImage: "arrow.up.right.square") {
+                    Task { await model.openLoginPage() }
+                }
+                .controlSize(.small)
+                .disabled(!model.canOpenLoginPage || model.isOpeningLoginPage)
             }
             ForEach(Provider.allCases) { provider in
                 Divider()
@@ -79,13 +84,17 @@ struct MenuBarView: View {
                 if !accounts.isEmpty {
                     Menu("전환") {
                         ForEach(accounts) { account in
+                            let presentation = switchPresentation(for: account)
                             Button {
-                                Task { await model.switchAccount(account.id) }
+                                Task { await model.switchAccount(account.id, relaunch: presentation.requiresRelaunch) }
                             } label: {
-                                if account.id == active?.id { Label(account.displayName, systemImage: "checkmark") }
+                                if presentation.requiresRelaunch { Text("\(account.displayName) · \(presentation.title)") }
+                                else if account.id == active?.id { Label(account.displayName, systemImage: "checkmark") }
                                 else { Text(account.displayName) }
                             }
-                            .disabled(account.id == active?.id || account.authenticationState != .valid || model.compatibility[provider]?.canWrite != true || model.isBusy)
+                            .disabled(!presentation.canSwitch)
+                            .help(presentation.help)
+                            .accessibilityHint(presentation.help)
                         }
                     }
                     .menuStyle(.borderlessButton)
@@ -114,15 +123,32 @@ struct MenuBarView: View {
                 }
             }
             if let pendingID = model.pendingSwitch[provider], let pending = accounts.first(where: { $0.id == pendingID }) {
+                let presentation = switchPresentation(for: pending)
                 Label("\(pending.displayName) 전환 대기", systemImage: "clock")
                     .font(.caption).foregroundStyle(.orange)
                 Text(provider == .codex ? "별도 CLI·IDE를 종료한 뒤 진행해주세요." : "Code 세션을 저장해야 하면 Claude를 정상 종료하고 목록을 보존한 뒤 다시 엽니다.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button(provider == .codex ? "전환 및 재실행" : "세션 보존 및 재실행") {
+                Button(presentation.title) {
                     Task { await model.switchAccount(pendingID, relaunch: true) }
                 }
-                .disabled(model.isBusy || model.compatibility[provider]?.canWrite != true)
+                .disabled(!presentation.canSwitch)
+                .help(presentation.help)
+                .accessibilityHint(presentation.help)
+                if let reason = presentation.disabledReason {
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
+    }
+
+    private func switchPresentation(for account: AccountRecord) -> AccountSwitchPresentation {
+        AccountSwitchPresentation(
+            account: account,
+            isActive: model.state.activeAccounts[account.provider] == account.id,
+            isPending: model.pendingSwitch[account.provider] == account.id,
+            compatibility: model.compatibility[account.provider],
+            isBusy: model.isBusy,
+            operationBlockReason: model.switchOperationBlockReason
+        )
     }
 }

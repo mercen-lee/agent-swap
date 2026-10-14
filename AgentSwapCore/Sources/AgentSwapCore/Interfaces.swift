@@ -28,6 +28,9 @@ public protocol ProviderAdapter: Sendable {
     func importCurrent() async throws -> ImportedAccount
     func login() async throws -> ImportedAccount
     func cancelLogin() async
+    /// A validated CLI fallback URL stays private to the runner and opens only on explicit request.
+    func canOpenLoginPage() async -> Bool
+    func openLoginPage() async throws
     func submitLoginCode(_ code: String) async throws
     func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential
     func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot
@@ -46,6 +49,8 @@ public protocol ProviderAdapter: Sendable {
 }
 
 public extension ProviderAdapter {
+    func canOpenLoginPage() async -> Bool { false }
+    func openLoginPage() async throws { throw AgentSwapError.unsupported("진행 중인 로그인 페이지가 없습니다.") }
     func submitLoginCode(_ code: String) async throws { throw AgentSwapError.unsupported("이 로그인에는 인증 코드 입력이 지원되지 않습니다.") }
     func recoverInterruptedSwitch() async throws { throw AgentSwapError.unsupported("이 제공자에는 복구할 전환이 없습니다.") }
     func hasPendingCredentialPersistence() async -> Bool { false }

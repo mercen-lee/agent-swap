@@ -60,10 +60,19 @@ private final class NativeFixtureVault: KeychainWritePreflighting, @unchecked Se
     func history() -> [String] { lock.withLock { operations } }
 }
 
+private struct NativeFixtureUnavailableSwiftWriter: NativeSwiftKeychainWriting {
+    func validateAvailability() throws { throw AgentSwapError.unsupported("fixture: no Swift toolchain") }
+    func write(_ data: Data, service: String, account: String,
+               interactionAllowed: Bool, timeout: TimeInterval) throws -> Int32 {
+        throw AgentSwapError.unsupported("fixture: no Swift toolchain")
+    }
+}
+
 private func nativeFixtureAccess(runner: any NativeSecurityRunning, vault: NativeFixtureVault = .init(),
                                  lockStatus: NativeFixtureLockStatus = .init()) -> ClaudeKeychainAccess {
     .init(fallback: vault, runner: runner, lockStatus: lockStatus,
-          interactionGate: KeychainInteractionGate(controller: NativeFixtureInteraction()))
+          interactionGate: KeychainInteractionGate(controller: NativeFixtureInteraction()),
+          swiftWriter: NativeFixtureUnavailableSwiftWriter())
 }
 
 private struct NativeFixtureCancellationCall: Sendable {
@@ -145,7 +154,7 @@ struct ClaudeNativeKeychainTests {
         #expect(lines.allSatisfy { $0.utf8.count <= 4_094 })
     }
 
-    @Test("Oversize native authentication is refused before any command or fallback mutation")
+    @Test("Large native authentication without an available interpreter is refused before mutation")
     func oversizeFailsBeforeTransport() {
         let runner = NativeFixtureRunner(.init(exitStatus: 0)), vault = NativeFixtureVault()
         let access = nativeFixtureAccess(runner: runner, vault: vault)

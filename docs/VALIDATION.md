@@ -33,7 +33,7 @@ plutil -lint AgentSwapApp/Info.plist AgentSwap.xcodeproj/project.pbxproj
 
 ## 자동 검증
 
-Core **252개 테스트·20개 스위트 통과**, Release **BUILD SUCCEEDED**, 앱 deep·strict 서명 검증과 plist·diff 검사 통과를 확인했습니다. 기존 macOS Keychain API의 deprecation 경고는 남아 있으며, 확인한 빌드에는 동시성 경고나 컴파일 오류가 없었습니다.
+초기 베타 검증에서 Core **252개 테스트·20개 스위트 통과**, Release **BUILD SUCCEEDED**, 앱 deep·strict 서명 검증과 plist·diff 검사 통과를 확인했습니다. 기존 macOS Keychain API의 deprecation 경고는 남아 있으며, 확인한 빌드에는 동시성 경고나 컴파일 오류가 없었습니다.
 
 저장소 준비 과정에서도 새 `scripts/test-core.sh`로 252개·20개 스위트가 통과했습니다. 전용 skill·CI YAML·내부 문서 링크·shell 문법·ignore 규칙과 index의 비밀 정보 후보 검사를 통과했습니다. 기본 앱을 교체하거나 인증을 변경하지 않았습니다.
 
@@ -83,13 +83,27 @@ Fixture는 합성 인증, 임시 디렉터리, 주입한 HTTP·Keychain·프로�
 
 `scripts/package-release.sh`로 격리된 Universal Release 빌드와 개발용 ZIP·SHA256SUMS 생성을 확인했습니다. ZIP을 다시 추출한 앱의 deep·strict 서명, arm64·x86_64 아키텍처, `net.mercen.agentswap` 번들 ID, 요청한 버전·빌드 번호, 최소 macOS 14.0, 체크섬이 모두 일치했습니다. 실행 중인 기본 앱의 실행 파일 바이트도 기존과 같았습니다. 실제 앱 실행이나 계정 인증 변경은 수행하지 않았습니다.
 
-버전별 출력 폴더의 기존 산출물을 덮어쓰지 않습니다. GitHub의 버전 태그 workflow는 테스트·패키징·검증 후 초안 prerelease를 만들며, 현재 검증에서 실제 태그나 릴리즈를 생성하지 않았습니다. ad-hoc 개발용 ZIP을 제공하는 경로이며 Developer ID 서명·공증·DMG와 실제 계정 검증은 별도 완료 조건입니다.
+버전별 출력 폴더의 기존 산출물을 덮어쓰지 않습니다. GitHub의 버전 태그 workflow는 테스트·패키징·검증 후 초안 prerelease를 만듭니다. `v0.1.0-beta.1`은 이 workflow에서 만든 ZIP·체크섬을 다시 내려받아 검증하고 공개 prerelease로 발행했습니다. ad-hoc 개발용 ZIP을 제공하는 경로이며 Developer ID 서명·공증·DMG와 실제 계정 검증은 별도 완료 조건입니다.
+
+## beta.2 인증·전환 수정 검증
+
+첫 베타의 Claude 인증 크기 제한은 현재 A의 원본을 복원할 수 없게 하므로 B 전환까지 보류했습니다. 큰 인증 경로를 추가하면서 모든 before/after 사전 검증과 정확한 복원 조건을 유지했습니다.
+
+- private 임시 Keychain의 합성 자료 약 64 KiB에서 큰 기존 항목 갱신·작은 원본 복원·없는 항목의 원자 생성 후 별도 SecurityTool의 2초 읽기가 정확한 바이트와 일치했습니다. Swift interpreter를 신뢰 앱에 명시하지 않은 SecurityTool 기본 ACL에서도 기존 항목 갱신·복원이 통과했습니다. helper 자체 읽기 성공은 근거로 사용하지 않습니다.
+- 번들 resource 코드의 실제 Security 호출도 임시 Keychain에 한정하는 search list·use keychain scope 두 곳만 실험용으로 주입해 같은 결과를 확인했습니다. 사용자의 default/search list·실제 인증은 변경하지 않았고 모든 실험 Keychain과 소유한 임시 디렉터리를 정리했습니다.
+- 큰 before/after·공유 MCP/플러그인 값, 부분 실패·취소 후 복원, CLI 출력 한도와 표준 입력 전송 경계, 도구 부재·잘못된 외부 읽기·변조된 resource 거부를 fixture로 확인했습니다.
+- 권한 상태가 바뀐 뒤 호환성 갱신과 다른 정상 계정의 전환, 조회 실패 시 마지막 정상 값·인증 상태 보존, 읽기 전용 명시 재확인, 저장 오류의 전환 안내를 fixture로 확인했습니다.
+- 설치된 Claude Code의 자동 callback URL과 출력된 수동 URL이 다름을 코드에서 확인했습니다. 합성 CLI로 앱의 추가 자동 열기 0회, 명시 재열기 1회·동시 중복 클릭 방지, `코드#state` 제출과 취소 정리를 확인했습니다.
+
+최종 수정에서 전체 Core **274개 테스트·24개 스위트**가 일반 실행 3.112초·strict cooperative pool 실행 3.587초에 통과했습니다. Xcode 27의 Universal Release 빌드·ZIP 생성 후 재추출한 앱의 deep·strict 서명, 양쪽 아키텍처, 번들 ID·버전·빌드 번호·최소 macOS 14.0, 내장 Swift helper digest와 체크섬을 확인했습니다. 기존 실행 앱은 교체하거나 실행하지 않았습니다.
+
+이 수정에서 실제 계정 전환·새 브라우저 로그인은 수행하지 않았습니다. 기존 실계정 CLI 결과는 앞선 저장 구현의 증거이며 새 큰 인증 경로의 실계정 검증과 구분합니다.
 
 ## 호환성 제한
 
 Claude의 네이티브 Keychain은 Apple `/usr/bin/security`의 고정 인자와 hex stdin 경로를 사용합니다. SDK 저장 후 자체 읽기와 API 조회만 성공하고 CLI 읽기는 실패한 이전 경로와 구분합니다. 네이티브 경로의 실제 CLI 왕복 성공은 설치 버전과 지원 입력 크기에 한정합니다.
 
-- 명령 한도는 4094바이트이며 공유 MCP·플러그인 자료를 포함한 실제 인증은 약 2 KiB까지만 지원합니다. 알려진 형식이라도 초과하면 원본을 유지하고 쓰기를 중단합니다. 큰 인증 자료의 전환·활성 토큰 갱신은 아직 지원하지 않습니다.
+- 작은 인증의 SecurityTool 명령 한도는 4094바이트입니다. 큰 인증은 Apple Swift interpreter 경로로 처리하며, CLI 읽기 출력 한도에 따라 ASCII 999,999바이트·비출력 바이트가 있는 기존 자료 499,999바이트까지 지원합니다. 전송 자체에는 추가 1 MiB 상한이 있습니다. Apple Command Line Tools 또는 Xcode·SDK가 없거나 도구 서명·resource digest 검증이 실패하면 쓰기를 중단합니다. 이를 사용자의 로그인 오류로 표시하지 않습니다.
 - 값 없는 `-w`의 비밀번호 입력은 공개 소스에서 `getpass()`의 128바이트 버퍼를 사용합니다. 큰 인증을 전달하는 대안으로 사용하지 않습니다. [SecurityTool](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/keychain_add.c), [Libc](https://github.com/apple-oss-distributions/Libc/blob/main/gen/FreeBSD/readpassphrase.c), [버퍼 정의](https://github.com/apple-oss-distributions/Libinfo/blob/main/lookup.subproj/pwd.h)
 - 앱 vault·복구·Codex의 Swift Security 호출은 백그라운드 승인 UI를 금지합니다. 별도 Claude SecurityTool에는 이 정책이 상속되지 않습니다. 잠금 사전 확인과 2초 제한을 적용하지만 승인 창이 절대 나타나지 않는다고 보장하지 않습니다.
 - 개발 빌드는 ad-hoc 서명입니다. 재빌드로 서명이 바뀌면 Keychain 항목별 승인을 다시 요청할 수 있습니다.

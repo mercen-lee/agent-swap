@@ -16,6 +16,17 @@ private struct NoLogin: ProviderLoginRunner {
     func login(provider: Provider) throws -> Credential { throw AgentSwapError.cancelled }
     func cancel() {}
 }
+private actor FixtureLoginURLOpener: ProviderLoginURLOpening {
+    private(set) var urls: [URL] = []
+    private var blocked: CheckedContinuation<Void, Never>?
+    private let holdOpen: Bool
+    init(holdOpen: Bool = false) { self.holdOpen = holdOpen }
+    func open(_ url: URL) async {
+        urls.append(url)
+        if holdOpen { await withCheckedContinuation { blocked = $0 } }
+    }
+    func release() { blocked?.resume(); blocked = nil }
+}
 // Safety invariant: the fake Keychain dictionary is accessed only under this lock.
 private final class ProviderFixtureKeychain: KeychainAccess, @unchecked Sendable {
     private let lock = NSLock()
@@ -564,6 +575,70 @@ struct ProviderTests {
         #expect(OfficialCLILoginRunner.loginURLs(text, provider: .codex).map(\.host) == ["auth.openai.com"])
         #expect(OfficialCLILoginRunner.loginURLs(text, provider: .claude).isEmpty)
     }
+    @Test("Only the first allowlisted explicit fallback is selected from repeated printed URLs")
+    func explicitLoginURLSelection() {
+        let fallback = "https://claude.com/cai/oauth/authorize?fixture=manual"
+        let text = "https://claude.ai/oauth/authorize?fixture=automatic\nIf the browser didn't open, visit: https://evil.example/oauth/authorize\nIf the browser didn't open, visit: \(fallback) \(fallback) https://platform.claude.com/oauth/authorize?fixture=other\n"
+        #expect(OfficialCLILoginRunner.loginPageURL(text, provider: .claude)?.absoluteString == fallback)
+        #expect(OfficialCLILoginRunner.loginPageURL("If the browser didn't open, visit:\n\(fallback)\n", provider: .claude)?.absoluteString == fallback)
+        #expect(OfficialCLILoginRunner.loginPageURL("https://evil.example/oauth/authorize", provider: .claude) == nil)
+        #expect(OfficialCLILoginRunner.loginPageURL("https://auth.openai.com/oauth/authorize?fixture=codex", provider: .codex)?.host == "auth.openai.com")
+    }
+    @Test("CLI owns automatic browser opening; explicit fallback opens one page and keeps code login", arguments: [Provider.claude, .codex])
+    func explicitBrowserFallback(_ provider: Provider) async throws {
+        let fixture = try ProviderFixture(); defer { fixture.cleanup() }
+        let initial = try provider == .claude ? fixture.claudeSwitch() : fixture.codex()
+        let seed = fixture.directory.appendingPathComponent("seed.json")
+        try initial.credential.rawAuth.write(to: seed)
+        let marker = fixture.directory.appendingPathComponent("profile-path")
+        let cliBrowserMarker = fixture.directory.appendingPathComponent("cli-browser-opened")
+        let script = fixture.directory.appendingPathComponent("fixture-login")
+        let homeKey = provider == .claude ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"
+        let authName = provider == .claude ? ".credentials.json" : "auth.json"
+        let automatic = provider == .claude ? "https://claude.ai/oauth/authorize?fixture=automatic" : "https://auth.openai.com/oauth/authorize?fixture=automatic"
+        let fallback = provider == .claude ? "https://claude.com/cai/oauth/authorize?fixture=manual" : "https://auth.openai.com/oauth/authorize?fixture=manual"
+        let arguments = provider == .claude ? "test \"$1\" = auth\ntest \"$2\" = login\ntest \"$3\" = --claudeai\n" : "test \"$1\" = login\n"
+        // The marker models the official CLI's own browser action, without opening a browser.
+        let text = "#!/bin/sh\nset -eu\n\(arguments)printf '%s' \"$\(homeKey)\" > '\(marker.path)'\nprintf 'opened' > '\(cliBrowserMarker.path)'\nprintf '%s\\n' 'Opening browser to sign in' '\(automatic)'\nprintf '%s\\n' \"If the browser didn't open, visit: \(fallback)\" '\(fallback)' 'https://evil.example/oauth/authorize'\nprintf 'Paste code here if prompted > '\nIFS= read -r code\ntest \"$code\" = 'fixture-auth#fixture-state'\n/bin/cp '\(seed.path)' \"$\(homeKey)/\(authName)\"\n"
+        try text.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let opener = FixtureLoginURLOpener(holdOpen: true)
+        let runner = OfficialCLILoginRunner(claudeExecutable: script, codexExecutable: script, keychain: fixture.keychain, urlOpener: opener)
+        #expect(await runner.canOpenLoginPage() == false)
+        await #expect(throws: AgentSwapError.self) { try await runner.openLoginPage() }
+        let login = Task { try await runner.login(provider: provider) }
+        let deadline = Date().addingTimeInterval(5)
+        while !(await runner.canOpenLoginPage()) && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        let ready = await runner.canOpenLoginPage()
+        guard ready else {
+            await runner.cancel(); _ = try? await login.value
+            Issue.record("Fixture did not expose a login fallback within the bounded wait")
+            return
+        }
+        #expect(FileManager.default.fileExists(atPath: cliBrowserMarker.path))
+        #expect(await opener.urls.isEmpty)
+        let opening = Task { try await runner.openLoginPage() }
+        let openingDeadline = Date().addingTimeInterval(5)
+        while await opener.urls.isEmpty && Date() < openingDeadline { try await Task.sleep(for: .milliseconds(50)) }
+        guard await opener.urls.count == 1 else {
+            await opener.release(); await runner.cancel()
+            _ = try? await opening.value; _ = try? await login.value
+            Issue.record("Fixture browser opener was not called within the bounded wait")
+            return
+        }
+        await #expect(throws: AgentSwapError.self) { try await runner.openLoginPage() }
+        #expect(await opener.urls.map(\.absoluteString) == [fallback])
+        await opener.release()
+        try await opening.value
+        try await runner.submitCode("fixture-auth#fixture-state")
+        let credential = try await login.value
+        #expect(credential.accessToken == initial.credential.accessToken)
+        #expect(await opener.urls.count == 1)
+        #expect(await runner.canOpenLoginPage() == false)
+        await #expect(throws: AgentSwapError.self) { try await runner.openLoginPage() }
+        let profile = try String(contentsOf: marker, encoding: .utf8)
+        #expect(!FileManager.default.fileExists(atPath: profile))
+    }
     @Test("Isolated CLI login collects only the temporary profile and removes it")
     func isolatedLogin() async throws {
         let fixture = try ProviderFixture(); defer { fixture.cleanup() }
@@ -611,6 +686,8 @@ struct ProviderTests {
     @Test("Optional login code capability has a safe unsupported default")
     func unsupportedCodeBridge() async {
         await #expect(throws: AgentSwapError.self) { try await NoLogin().submitCode("fixture-auth#fixture-state") }
+        #expect(await NoLogin().canOpenLoginPage() == false)
+        await #expect(throws: AgentSwapError.self) { try await NoLogin().openLoginPage() }
     }
     @Test("Failed login cleanup avoids permission UI and reports retained protected fixture data")
     func cleanupPermissionFailure() async throws {
@@ -639,10 +716,11 @@ struct ProviderTests {
         let fixture = try ProviderFixture(); defer { fixture.cleanup() }
         let marker = fixture.directory.appendingPathComponent("profile-path")
         let script = fixture.directory.appendingPathComponent("fixture-codex")
-        let text = "#!/bin/sh\ntrap '' TERM\nprintf '%s' \"$CODEX_HOME\" > '\(marker.path)'\nprintf 'temporary-fixture-auth' > \"$CODEX_HOME/auth.json\"\nwhile :; do /bin/sleep 1; done\n"
+        let text = "#!/bin/sh\ntrap '' TERM\nprintf '%s' \"$CODEX_HOME\" > '\(marker.path)'\nprintf 'temporary-fixture-auth' > \"$CODEX_HOME/auth.json\"\nprintf '%s\\n' 'https://auth.openai.com/oauth/authorize?fixture=cancelled'\nwhile :; do /bin/sleep 1; done\n"
         try text.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
-        let runner = OfficialCLILoginRunner(codexExecutable: script, keychain: fixture.keychain)
+        let opener = FixtureLoginURLOpener()
+        let runner = OfficialCLILoginRunner(codexExecutable: script, keychain: fixture.keychain, urlOpener: opener)
         let task = Task { try await runner.login(provider: .codex) }
         let deadline = Date().addingTimeInterval(5)
         while !FileManager.default.fileExists(atPath: marker.path) && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
@@ -650,6 +728,9 @@ struct ProviderTests {
         if taskCancellation { task.cancel() } else { await runner.cancel() }
         do { _ = try await task.value; Issue.record("Login should be cancelled") }
         catch { #expect(error as? AgentSwapError == .cancelled) }
+        #expect(await runner.canOpenLoginPage() == false)
+        await #expect(throws: AgentSwapError.self) { try await runner.openLoginPage() }
+        #expect(await opener.urls.isEmpty)
         let profile = try String(contentsOf: marker, encoding: .utf8)
         #expect(!FileManager.default.fileExists(atPath: profile))
     }

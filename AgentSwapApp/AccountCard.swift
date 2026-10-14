@@ -62,12 +62,18 @@ struct AccountDetailView: View {
     let isPending: Bool
     let compatibility: CompatibilityStatus?
     let isBusy: Bool
+    let switchOperationBlockReason: String?
     let onSwitch: (Bool) -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onEligibility: @MainActor @Sendable (Bool) -> Void
     let onRecover: () -> Void
+    let onRecheckCompatibility: () -> Void
     let onAuthorizeSavedCredential: () -> Void
+
+    private var switchPresentation: AccountSwitchPresentation {
+        AccountSwitchPresentation(account: account, isActive: isActive, isPending: isPending, compatibility: compatibility, isBusy: isBusy, operationBlockReason: switchOperationBlockReason)
+    }
 
     var body: some View {
         Form {
@@ -143,12 +149,19 @@ struct AccountDetailView: View {
             }
             Section("전환 호환성") {
                 if let compatibility {
-                    Label(compatibility.message, systemImage: compatibility.canWrite ? "checkmark.shield" : "exclamationmark.shield")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if !switchPresentation.displaysCompatibilityReason {
+                        Label(compatibility.message, systemImage: compatibility.canWrite ? "checkmark.shield" : "exclamationmark.shield")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if !compatibility.canWrite && compatibility.message.contains("복원") {
                         Button("중단된 전환 복구", systemImage: "arrow.uturn.backward", action: onRecover).disabled(isBusy)
                     }
                 } else { Text("확인 중…").foregroundStyle(.secondary) }
+                if compatibility?.canWrite != true {
+                    Button("전환 호환성 다시 확인", systemImage: "arrow.clockwise", action: onRecheckCompatibility)
+                        .disabled(isBusy)
+                        .help("현재 인증 저장소의 전환 가능 여부를 다시 확인합니다.")
+                }
                 if isPending {
                     if account.provider == .codex {
                         Text("별도 CLI·IDE를 종료해주세요. 전환 및 재실행을 누르면 Codex를 정상 종료하고 인증을 교체한 뒤 데스크톱 앱을 다시 엽니다.")
@@ -166,9 +179,8 @@ struct AccountDetailView: View {
         .formStyle(.grouped)
         .safeAreaInset(edge: .bottom) {
             AccountActionBar(
-                switchTitle: isPending ? (account.provider == .codex ? "전환 및 재실행" : "세션 보존 및 재실행") : (isActive ? "현재 계정" : "계정 전환"),
-                canSwitch: !isBusy && compatibility?.canWrite == true && account.authenticationState == .valid && (!isActive || isPending),
-                onSwitch: { onSwitch(isPending) },
+                presentation: switchPresentation,
+                onSwitch: { onSwitch(switchPresentation.requiresRelaunch) },
                 onEdit: onEdit
             )
             .padding(12)
@@ -177,29 +189,44 @@ struct AccountDetailView: View {
 }
 
 private struct AccountActionBar: View {
-    let switchTitle: String
-    let canSwitch: Bool
+    let presentation: AccountSwitchPresentation
     let onSwitch: () -> Void
     let onEdit: () -> Void
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let reason = presentation.disabledReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            controls
+        }
+        .help(presentation.help)
+    }
+
+    @ViewBuilder
+    private var controls: some View {
         if #available(macOS 26, *) {
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
                     Button("별명", systemImage: "pencil", action: onEdit).buttonStyle(.glass)
                     Spacer(minLength: 0)
-                    Button(switchTitle, systemImage: "arrow.left.arrow.right", action: onSwitch)
+                    Button(presentation.title, systemImage: "arrow.left.arrow.right", action: onSwitch)
                         .buttonStyle(.glassProminent)
-                        .disabled(!canSwitch)
+                        .disabled(!presentation.canSwitch)
+                        .accessibilityHint(presentation.help)
                 }
             }
         } else {
             HStack(spacing: 8) {
                 Button("별명", systemImage: "pencil", action: onEdit)
                 Spacer(minLength: 0)
-                Button(switchTitle, systemImage: "arrow.left.arrow.right", action: onSwitch)
+                Button(presentation.title, systemImage: "arrow.left.arrow.right", action: onSwitch)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canSwitch)
+                    .disabled(!presentation.canSwitch)
+                    .accessibilityHint(presentation.help)
             }
         }
     }

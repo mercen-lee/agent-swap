@@ -12,7 +12,9 @@ struct SettingsView: View {
     private var appVersionTitle: String {
         guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "AgentSwap" }
-        return "AgentSwap \(version)"
+        guard let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+              !build.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "AgentSwap \(version)" }
+        return "AgentSwap \(version) · 빌드 \(build)"
     }
 
     var body: some View {

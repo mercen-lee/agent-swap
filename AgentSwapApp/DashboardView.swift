@@ -160,10 +160,13 @@ struct DashboardView: View {
                     )
                     .tag(account.id)
                     .contextMenu {
-                        Button("이 계정으로 전환", systemImage: "arrow.left.arrow.right") {
-                            Task { await model.switchAccount(account.id) }
+                        let presentation = switchPresentation(for: account)
+                        Button(presentation.requiresRelaunch ? presentation.title : "이 계정으로 전환", systemImage: "arrow.left.arrow.right") {
+                            Task { await model.switchAccount(account.id, relaunch: presentation.requiresRelaunch) }
                         }
-                        .disabled(model.isBusy || model.state.activeAccounts[account.provider] == account.id || model.compatibility[account.provider]?.canWrite != true || account.authenticationState != .valid)
+                        .disabled(!presentation.canSwitch)
+                        .help(presentation.help)
+                        .accessibilityHint(presentation.help)
                         Button("별명 변경", systemImage: "pencil") { editingAccount = account }
                         Toggle("자동 전환 후보", isOn: Binding(
                             get: { account.automaticSwitchEligible },
@@ -208,6 +211,11 @@ struct DashboardView: View {
                         Spacer()
                         Button("취소") { Task { await model.cancelLogin() } }
                     }
+                    Button("로그인 페이지 다시 열기", systemImage: "arrow.up.right.square") {
+                        Task { await model.openLoginPage() }
+                    }
+                    .controlSize(.small)
+                    .disabled(!model.canOpenLoginPage || model.isOpeningLoginPage)
                     if model.loggingInProvider == .claude {
                         AuthCodeEntry(model: model)
                     }
@@ -248,16 +256,29 @@ struct DashboardView: View {
                 isPending: model.pendingSwitch[account.provider] == account.id,
                 compatibility: model.compatibility[account.provider],
                 isBusy: model.isBusy,
+                switchOperationBlockReason: model.switchOperationBlockReason,
                 onSwitch: { relaunch in Task { await model.switchAccount(account.id, relaunch: relaunch) } },
                 onEdit: { editingAccount = account },
                 onDelete: { deletingAccount = account },
                 onEligibility: { value in Task { await model.updateAccount(account.id, nickname: nil, automaticSwitchEligible: value) } },
                 onRecover: { Task { await model.recoverInterruptedSwitch(account.provider) } },
+                onRecheckCompatibility: { Task { await model.recheckCompatibility(account.provider) } },
                 onAuthorizeSavedCredential: { Task { await model.authorizeSavedCredential(account.id) } }
             )
         } else {
             ContentUnavailableView("계정 선택", systemImage: "person.crop.circle", description: Text("목록에서 계정을 선택하면 사용량과 인증 상태를 확인할 수 있습니다."))
         }
+    }
+
+    private func switchPresentation(for account: AccountRecord) -> AccountSwitchPresentation {
+        AccountSwitchPresentation(
+            account: account,
+            isActive: model.state.activeAccounts[account.provider] == account.id,
+            isPending: model.pendingSwitch[account.provider] == account.id,
+            compatibility: model.compatibility[account.provider],
+            isBusy: model.isBusy,
+            operationBlockReason: model.switchOperationBlockReason
+        )
     }
 }
 

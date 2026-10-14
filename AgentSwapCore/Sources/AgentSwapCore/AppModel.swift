@@ -14,6 +14,17 @@ public final class AppModel {
     public private(set) var loggingInProvider: Provider?
     public private(set) var loginStatus: String?
     public private(set) var isSubmittingLoginCode = false
+    public private(set) var canOpenLoginPage = false
+    public private(set) var isOpeningLoginPage = false
+
+    /// UI and the engine share the lifecycle/storage blockers; a rejected operation must be explainable.
+    public var switchOperationBlockReason: String? {
+        if isPreparingForTermination { return "갱신된 인증을 저장하고 종료하는 중입니다." }
+        if !storageHealthy { return "저장 오류로 계정 변경을 중단했습니다. 앱을 다시 실행해 주세요." }
+        if isStarting { return "현재 로그인과 전환 호환성을 확인하고 있습니다." }
+        if isBusy { return "다른 작업이 진행 중입니다. 완료 후 전환하세요." }
+        return nil
+    }
 
     @ObservationIgnored private let adapters: [Provider: any ProviderAdapter]
     @ObservationIgnored private let secrets: any SecretStore
@@ -22,6 +33,7 @@ public final class AppModel {
     @ObservationIgnored private let claudeSessions: (any ClaudeDesktopSessionPreserving)?
     @ObservationIgnored private var scheduler: Task<Void, Never>?
     @ObservationIgnored private var loginTask: Task<Void, Never>?
+    @ObservationIgnored private var loginGeneration: UUID?
     @ObservationIgnored private var started = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var busyCount = 0
@@ -90,6 +102,17 @@ public final class AppModel {
 
     public func refreshAll() async {
         await refreshDue(force: true)
+    }
+    /// Explicitly retries provider-store access without changing credentials or invoking a switch.
+    public func recheckCompatibility(_ provider: Provider) async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard !self.isStarting, !self.isPreparingForTermination, let adapter = self.adapters[provider] else { return }
+            await self.operations.acquire(provider); self.beginOperation()
+            guard !self.isPreparingForTermination else { await self.finishOperation(provider); return }
+            self.compatibility[provider] = await adapter.compatibility()
+            self.message = self.compatibility[provider]?.message
+            await self.finishOperation(provider)
+        }
     }
     public func authorizeSavedCredential(_ id: UUID) async {
         guard !isStarting, !isPreparingForTermination, let account = state.accounts.first(where: { $0.id == id }) else { return }
@@ -203,6 +226,9 @@ public final class AppModel {
             } else { cache.retryAfter = now.addingTimeInterval(60) }
         }
         if state.accounts.contains(where: { $0.id == id }) { state.usage[id] = cache }
+        // A successful retry or failed native update can change write compatibility. Do not
+        // leave all target accounts blocked by an obsolete startup inspection.
+        compatibility[account.provider] = await adapter.compatibility()
         await persist(); await finishOperation(account.provider)
     }
 
@@ -231,10 +257,21 @@ public final class AppModel {
     private func loginWithInteraction(_ provider: Provider) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, !isLoggingIn, let adapter = adapters[provider] else { return }
         isLoggingIn = true; loggingInProvider = provider
+        let generation = UUID(); loginGeneration = generation
+        canOpenLoginPage = false; isOpeningLoginPage = false
         loginStatus = "브라우저에서 \(provider.title) 로그인을 완료해 주세요. 기존 계정과 분리된 임시 프로필을 사용합니다."
         loginTask = Task { [weak self] in
             guard let self else { return }
             await self.operations.acquire(provider); self.beginOperation()
+            let pageMonitor = Task { [weak self] in
+                guard self?.isLoggingIn == true else { return }
+                while !Task.isCancelled {
+                    let available = await adapter.canOpenLoginPage()
+                    guard !Task.isCancelled, let self, self.isLoggingIn, self.loggingInProvider == provider else { return }
+                    self.canOpenLoginPage = available
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                }
+            }
             do {
                 try Task.checkCancellation()
                 guard !self.isPreparingForTermination else { throw CancellationError() }
@@ -260,10 +297,23 @@ public final class AppModel {
                     await self.persist()
                 }
             } catch { self.message = error.localizedDescription }
+            pageMonitor.cancel()
+            await pageMonitor.value
+            self.compatibility[provider] = await adapter.compatibility()
+            self.canOpenLoginPage = false; self.isOpeningLoginPage = false
+            if self.loginGeneration == generation { self.loginGeneration = nil }
             self.isLoggingIn = false; self.loggingInProvider = nil; self.loginStatus = nil; self.loginTask = nil
             await self.finishOperation(provider)
             await self.refreshDue(force: true)
         }
+    }
+    public func openLoginPage() async {
+        guard !isPreparingForTermination, isLoggingIn, canOpenLoginPage, !isOpeningLoginPage,
+              let generation = loginGeneration, let provider = loggingInProvider, let adapter = adapters[provider] else { return }
+        isOpeningLoginPage = true
+        defer { if loginGeneration == generation { isOpeningLoginPage = false } }
+        do { try await adapter.openLoginPage() }
+        catch { if loginGeneration == generation { message = error.localizedDescription } }
     }
     public func cancelLogin() async {
         await KeychainInteraction.$mode.withValue(.interactive) { await cancelLoginWithInteraction() }

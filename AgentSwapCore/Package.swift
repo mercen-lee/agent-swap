@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.library(name: "AgentSwapCore", targets: ["AgentSwapCore"])],
     targets: [
-        .target(name: "AgentSwapCore"),
+        .target(name: "AgentSwapCore", resources: [.copy("Resources/ClaudeKeychainWriter.swift")]),
         .testTarget(name: "AgentSwapCoreTests", dependencies: ["AgentSwapCore"])
     ],
     swiftLanguageModes: [.v6]

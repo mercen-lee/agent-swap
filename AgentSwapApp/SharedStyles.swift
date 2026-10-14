@@ -36,6 +36,71 @@ enum UsagePresentation {
     }
 }
 
+struct AccountSwitchPresentation {
+    enum BlockReason {
+        case currentAccount
+        case busy
+        case operation(String)
+        case authentication(AuthenticationState)
+        case checkingCompatibility
+        case compatibility(String)
+
+        var message: String {
+            switch self {
+            case .currentAccount:
+                "이미 현재 계정입니다."
+            case .busy:
+                "다른 작업이 진행 중입니다. 완료 후 전환하세요."
+            case .operation(let message):
+                message
+            case .authentication(.expired):
+                "인증이 만료되었습니다. 새로고침하거나 다시 로그인한 뒤 전환하세요."
+            case .authentication(.needsLogin):
+                "다시 로그인해야 합니다. 계정 추가에서 이 계정에 로그인하세요."
+            case .authentication(.unsupported):
+                "지원하지 않는 인증 형식으로 전환할 수 없습니다."
+            case .authentication(.valid):
+                "인증 상태를 다시 확인하세요."
+            case .checkingCompatibility:
+                "전환 호환성을 확인 중입니다. 잠시 후 다시 시도하세요."
+            case .compatibility(let message):
+                "전환할 수 없습니다. \(message)"
+            }
+        }
+    }
+
+    let title: String
+    let requiresRelaunch: Bool
+    let blockReason: BlockReason?
+
+    init(account: AccountRecord, isActive: Bool, isPending: Bool, compatibility: CompatibilityStatus?, isBusy: Bool, operationBlockReason: String?) {
+        requiresRelaunch = isPending
+        title = isPending ? (account.provider == .codex ? "전환 및 재실행" : "세션 보존 및 재실행") : (isActive ? "현재 계정" : "계정 전환")
+        if isActive && !isPending {
+            blockReason = .currentAccount
+        } else if let operationBlockReason {
+            blockReason = .operation(operationBlockReason)
+        } else if isBusy {
+            blockReason = .busy
+        } else if account.authenticationState != .valid {
+            blockReason = .authentication(account.authenticationState)
+        } else if let compatibility {
+            blockReason = compatibility.canWrite ? nil : .compatibility(compatibility.message)
+        } else {
+            blockReason = .checkingCompatibility
+        }
+    }
+
+    var canSwitch: Bool {
+        if case nil = blockReason { true } else { false }
+    }
+    var disabledReason: String? { blockReason?.message }
+    var help: String { disabledReason ?? (requiresRelaunch ? title : "선택한 계정으로 전환합니다.") }
+    var displaysCompatibilityReason: Bool {
+        if case .compatibility(_)? = blockReason { true } else { false }
+    }
+}
+
 struct UsageProgress: View {
     let window: UsageWindow
     var compact = false

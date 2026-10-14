@@ -14,6 +14,8 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     public func importCurrent() async throws -> ImportedAccount { try await identify(await authStore.read()) }
     public func login() async throws -> ImportedAccount { try await identify(await loginRunner.login(provider: provider)) }
     public func cancelLogin() async { await loginRunner.cancel() }
+    public func canOpenLoginPage() async -> Bool { await loginRunner.canOpenLoginPage() }
+    public func openLoginPage() async throws { try await loginRunner.openLoginPage() }
     public func submitLoginCode(_ code: String) async throws { try await loginRunner.submitCode(code) }
     private func identify(_ input: Credential) async throws -> ImportedAccount {
         if let account = try? ProviderAccountParser.claude(input) { return account }
@@ -159,6 +161,8 @@ public actor CodexProviderAdapter: ProviderAdapter {
     public func importCurrent() async throws -> ImportedAccount { try ProviderAccountParser.codex(await authStore.read()) }
     public func login() async throws -> ImportedAccount { try ProviderAccountParser.codex(await loginRunner.login(provider: provider)) }
     public func cancelLogin() async { await loginRunner.cancel() }
+    public func canOpenLoginPage() async -> Bool { await loginRunner.canOpenLoginPage() }
+    public func openLoginPage() async throws { try await loginRunner.openLoginPage() }
     public func submitLoginCode(_ code: String) async throws { try await loginRunner.submitCode(code) }
     public func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential {
         guard let refresh = credential.refreshToken else { throw AgentSwapError.authentication("Codex 갱신 토큰이 없습니다. 다시 로그인하세요.") }
