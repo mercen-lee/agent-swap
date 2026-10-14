@@ -9,6 +9,12 @@ struct SettingsView: View {
     @State private var loginError: String?
     @State private var isChangingLogin = false
 
+    private var appVersionTitle: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "AgentSwap" }
+        return "AgentSwap \(version)"
+    }
+
     var body: some View {
         TabView {
             general
@@ -133,7 +139,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            Section("AgentSwap 1.0") {
+            Section(appVersionTitle) {
                 Text("기본 로컬 프로필의 구독 계정을 관리합니다. API 키, 프로젝트별 계정 실행, 클라우드 동기화와 인증 내보내기는 지원 범위에 포함되지 않습니다.")
                     .font(.caption).foregroundStyle(.secondary)
             }

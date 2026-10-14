@@ -40,37 +40,91 @@ private actor CodexBoundaryBackup {
     func save(_ value: ImportedAccount) { values.append(value) }
 }
 
-// This synchronous gate blocks only the injected file boundary. Its state and continuations are
-// protected by the condition; async test callers await a continuation without holding a lock.
+private struct CodexBoundaryDriverOutcome<Value: Sendable>: Sendable {
+    let entered: Bool
+    let value: Value?
+}
+
+// The lock protects one result handoff only. No caller holds it across an await or waits for
+// another task while holding it; Dispatch completes the result outside the cooperative pool.
+// Replace this unchecked wrapper with Mutex-owned state when the minimum OS supports it.
+private final class CodexBoundaryDriver<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcome: CodexBoundaryDriverOutcome<Value>?
+    private var waiter: CheckedContinuation<CodexBoundaryDriverOutcome<Value>, Never>?
+
+    func complete(_ value: CodexBoundaryDriverOutcome<Value>) {
+        let continuation = lock.withLock {
+            outcome = value
+            let continuation = waiter
+            waiter = nil
+            return continuation
+        }
+        continuation?.resume(returning: value)
+    }
+
+    func value() async -> CodexBoundaryDriverOutcome<Value> {
+        await withCheckedContinuation { continuation in
+            let ready: CodexBoundaryDriverOutcome<Value>? = lock.withLock {
+                if let outcome { return outcome }
+                waiter = continuation
+                return nil
+            }
+            if let ready { continuation.resume(returning: ready) }
+        }
+    }
+}
+
+// The condition protects the simulated synchronous file boundary. Enter/cancel/release is
+// driven by Dispatch, so releasing a blocked actor never needs another cooperative worker.
+// Both waits have independent bounds, and the test checks them instead of hiding a timeout.
 private final class CodexBoundaryGate: @unchecked Sendable {
     private let condition = NSCondition()
     private var entered = false
     private var released = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var timedOut = false
 
     func block() {
         condition.lock()
+        defer { condition.unlock() }
         entered = true
-        let callbacks = waiters
-        waiters.removeAll()
-        condition.unlock()
-        callbacks.forEach { $0.resume() }
-        condition.lock()
-        while !released { condition.wait() }
-        condition.unlock()
-    }
-
-    func waitUntilEntered() async {
-        await withCheckedContinuation { continuation in
-            condition.lock()
-            if entered {
-                condition.unlock()
-                continuation.resume()
-            } else {
-                waiters.append(continuation)
-                condition.unlock()
+        condition.broadcast()
+        let deadline = Date().addingTimeInterval(3)
+        while !released {
+            if !condition.wait(until: deadline), !released {
+                timedOut = true
+                released = true
+                condition.broadcast()
             }
         }
+    }
+
+    func driveWhenEntered<Value: Sendable>(_ action: @escaping @Sendable () -> Value) -> CodexBoundaryDriver<Value> {
+        let driver = CodexBoundaryDriver<Value>()
+        DispatchQueue.global(qos: .userInitiated).async {
+            driver.complete(self.performWhenEntered(action))
+        }
+        return driver
+    }
+
+    private func performWhenEntered<Value: Sendable>(_ action: @Sendable () -> Value) -> CodexBoundaryDriverOutcome<Value> {
+        defer { release() }
+        condition.lock()
+        let deadline = Date().addingTimeInterval(2)
+        while !entered {
+            if !condition.wait(until: deadline), !entered {
+                condition.unlock()
+                return .init(entered: false, value: nil)
+            }
+        }
+        condition.unlock()
+        return .init(entered: true, value: action())
+    }
+
+    func didTimeOut() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return timedOut
     }
 
     func release() {
@@ -322,13 +376,17 @@ struct CodexSwitchBoundaryTests {
         let fixture = try CodexBoundaryFixture(mode: mode); defer { fixture.cleanup() }
         let gate = CodexBoundaryGate()
         fixture.files.blockNextRead(at: fixture.configURL, with: gate)
+        let driver = gate.driveWhenEntered {
+            let activation = Task { try await fixture.store.activate(fixture.target.credential, expectedSourceAuth: fixture.effectiveSource.credential.rawAuth) }
+            activation.cancel()
+            return activation
+        }
         let occupyingRead = Task { try await fixture.store.storageMode() }
-        await gate.waitUntilEntered()
-        let activation = Task { try await fixture.store.activate(fixture.target.credential, expectedSourceAuth: fixture.effectiveSource.credential.rawAuth) }
-        activation.cancel()
-        gate.release()
+        let outcome = await driver.value()
         _ = try await occupyingRead.value
+        let activation = try #require(outcome.value, "Independent cancellation controller did not reach the occupied actor")
         await #expect(throws: (any Error).self) { try await activation.value }
+        #expect(outcome.entered && !gate.didTimeOut(), "Independent cancellation controller must release the fixture before its watchdog")
         try fixture.expectNative(file: fixture.originalFile, secure: fixture.originalKeychain)
         #expect(!fixture.files.wrote(fixture.target.credential.rawAuth, to: fixture.authURL))
         #expect(!fixture.keychain.wrote(fixture.target.credential.rawAuth, service: CodexAuthStore.keychainService, account: fixture.store.keychainAccount))
@@ -340,10 +398,10 @@ struct CodexSwitchBoundaryTests {
         let gate = CodexBoundaryGate()
         fixture.files.blockNextRead(at: fixture.configURL, with: gate)
         let activation = Task { try await fixture.store.activate(fixture.target.credential, expectedSourceAuth: fixture.fileSource.credential.rawAuth) }
-        await gate.waitUntilEntered()
-        activation.cancel()
-        gate.release()
+        let driver = gate.driveWhenEntered { activation.cancel() }
+        let outcome = await driver.value()
         await #expect(throws: (any Error).self) { try await activation.value }
+        #expect(outcome.entered && !gate.didTimeOut(), "Independent cancellation controller must release the fixture before its watchdog")
         try fixture.expectNative(file: fixture.originalFile, secure: fixture.originalKeychain)
         #expect(!fixture.files.wrote(fixture.target.credential.rawAuth, to: fixture.authURL))
     }

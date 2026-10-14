@@ -29,6 +29,26 @@ open build/AgentSwap.app --args --demo
 
 실제 검증 결과는 날짜·도구 버전·확인 범위만 [검증 기록](docs/VALIDATION.md)에 적습니다. fixture, CLI 로그인, 데스크톱 로그인, 대화 재개를 별도로 구분하세요. 두 번째 계정이 없는 경우 동일 계정 로그인으로 전환 검증을 대체하지 않습니다.
 
+## 초안 릴리스
+
+[릴리스 워크플로](.github/workflows/release.yml)는 원격 저장소에 버전 태그를 push할 때 실행합니다. 태그는 `vMAJOR.MINOR.PATCH` 형식이며 `v0.1.0-beta.1`처럼 SemVer prerelease 식별자를 붙일 수 있습니다. `+build` 메타데이터는 받지 않습니다. 태그 생성과 push는 릴리스 담당자의 별도 작업이며, 워크플로가 태그를 자동으로 만들지 않습니다.
+
+태그의 소스로 Core 테스트를 실행하고, macOS 14를 최소 대상으로 하는 `arm64`·`x86_64` Universal Release 앱을 ad-hoc 서명해 ZIP으로 묶습니다. 인증서나 공증 자격 증명은 사용하지 않습니다. 앱의 `CFBundleShortVersionString`에는 태그의 숫자 기본 버전, `CFBundleVersion`에는 `github.run_number`를 사용합니다. prerelease 식별자를 포함한 전체 버전은 태그와 ZIP 이름에 유지합니다.
+
+테스트·패키징·체크섬 확인이 성공하면 ZIP과 `SHA256SUMS`를 첨부한 **draft prerelease**를 생성합니다. 담당자는 GitHub의 Releases에서 릴리스 노트, 알려진 제한과 첨부 파일을 검토한 뒤 공개 여부를 결정합니다. 기존 같은 태그의 초안이나 첨부 파일은 덮어쓰지 않으므로 재실행으로 교체하지 말고 새 버전을 준비하세요. 초안 생성이나 Universal 빌드는 v1 완료·실계정 호환성 검증을 뜻하지 않습니다.
+
+로컬 패키징은 다음과 같습니다. 일반 빌드의 `build/AgentSwap.app`을 설치하거나 실행하지 않습니다.
+
+```sh
+./scripts/package-release.sh 0.1.0
+```
+
+- 산출물: `build/releases/0.1.0/AgentSwap-0.1.0-universal.zip`, `build/releases/0.1.0/SHA256SUMS`
+- 같은 버전 폴더가 있으면 덮어쓰기를 거부합니다.
+- 로컬 빌드 번호는 기본 `1`이며 `AGENTSWAP_RELEASE_BUILD_NUMBER`에 양의 정수를 지정할 수 있습니다.
+
+현재 패키징은 Developer ID 서명·Apple 공증·DMG를 제공하지 않습니다. `codesign` 검증과 SHA-256 일치는 앱·파일의 무결성 확인이며 Gatekeeper의 개발자 신원·공증 검증과 다릅니다. 다운로드한 개발용 앱은 macOS에서 경고하거나 차단될 수 있습니다. [Apple의 Gatekeeper 안내](https://support.apple.com/ko-kr/102445)
+
 ## Git에 포함할 자료
 
 소스·공유 Xcode scheme·아이콘 자산·합성 fixture와 문서를 포함합니다. 앱·DerivedData·SwiftPM 캐시·Xcode 사용자 상태는 제외합니다. 인증 파일·토큰·실계정 정보·대화·로그·개인 절대 경로는 커밋하지 않습니다. 공개 스크린샷에는 데모 계정만 사용하세요.

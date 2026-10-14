@@ -35,7 +35,9 @@ plutil -lint AgentSwapApp/Info.plist AgentSwap.xcodeproj/project.pbxproj
 
 Core **252개 테스트·20개 스위트 통과**, Release **BUILD SUCCEEDED**, 앱 deep·strict 서명 검증과 plist·diff 검사 통과를 확인했습니다. 기존 macOS Keychain API의 deprecation 경고는 남아 있으며, 확인한 빌드에는 동시성 경고나 컴파일 오류가 없었습니다.
 
-저장소 준비 과정에서도 새 `scripts/test-core.sh`로 252개·20개 스위트가 통과했습니다. 전용 skill·CI YAML·내부 문서 링크·shell 문법·ignore 규칙과 index의 비밀 정보 후보 검사를 통과했습니다. GitHub의 원격 CI 실행 결과는 아직 없으며 기존 앱을 재빌드하거나 인증을 변경하지 않았습니다.
+저장소 준비 과정에서도 새 `scripts/test-core.sh`로 252개·20개 스위트가 통과했습니다. 전용 skill·CI YAML·내부 문서 링크·shell 문법·ignore 규칙과 index의 비밀 정보 후보 검사를 통과했습니다. 기본 앱을 교체하거나 인증을 변경하지 않았습니다.
+
+첫 GitHub CI는 Core 빌드를 완료했지만 테스트 실행이 끝나지 않고 작업의 20분 제한 부근에서 취소됐습니다. 별도 strict cooperative pool 실행에서 Codex 취소 fixture의 동기 대기로 테스트가 정체되는 문제를 재현했습니다. 취소·해제 제어를 독립 Dispatch 실행기로 옮기고 대기에 상한과 실패 assertion을 추가했으며 기존 병렬화·인증 보존 검증은 유지했습니다. 수정 후 관련 9개 테스트가 strict·일반 실행 모두 통과했고, 전체 252개·20개 스위트도 일반 2.973초·strict 3.502초에 통과했습니다. 이 로컬 재현을 첫 원격 실행의 유일한 원인으로 단정하지 않으며 수정본의 원격 CI 결과를 별도로 확인합니다.
 
 Fixture는 합성 인증, 임시 디렉터리, 주입한 HTTP·Keychain·프로세스 제어를 사용합니다. 테스트를 실행하기 위해 실제 계정에 로그인할 필요는 없습니다.
 
@@ -76,6 +78,12 @@ Fixture는 합성 인증, 임시 디렉터리, 주입한 HTTP·Keychain·프로�
 - Claude 데스크톱 로그인 변경 후 기존 Code 대화를 새 계정으로 그대로 이어 쓰기. 현재 로컬 목록 보존만으로 이를 해결하거나 입증하지 못했습니다.
 - 현재 빌드의 실제 메뉴 전환과 창 수명 재확인, 로그인 시 실행 등록 후 재로그인, macOS 14·15 실제 실행 확인.
 - Developer ID 서명·공증·DMG. 배포 인증서가 준비된 뒤 적용합니다.
+
+## 릴리즈 패키징
+
+`scripts/package-release.sh`로 격리된 Universal Release 빌드와 개발용 ZIP·SHA256SUMS 생성을 확인했습니다. ZIP을 다시 추출한 앱의 deep·strict 서명, arm64·x86_64 아키텍처, `net.mercen.agentswap` 번들 ID, 요청한 버전·빌드 번호, 최소 macOS 14.0, 체크섬이 모두 일치했습니다. 실행 중인 기본 앱의 실행 파일 바이트도 기존과 같았습니다. 실제 앱 실행이나 계정 인증 변경은 수행하지 않았습니다.
+
+버전별 출력 폴더의 기존 산출물을 덮어쓰지 않습니다. GitHub의 버전 태그 workflow는 테스트·패키징·검증 후 초안 prerelease를 만들며, 현재 검증에서 실제 태그나 릴리즈를 생성하지 않았습니다. ad-hoc 개발용 ZIP을 제공하는 경로이며 Developer ID 서명·공증·DMG와 실제 계정 검증은 별도 완료 조건입니다.
 
 ## 호환성 제한
 

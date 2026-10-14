@@ -19,6 +19,7 @@ description: "Implement, review, or verify AgentSwap’s Swift macOS account man
 | 스케줄러·캐시·자동 전환 | `AppModel.swift`, `AccountOperationQueue.swift`, `AutomaticSwitchPolicy.swift`, `Models.swift` | `EngineTests`, `AutomaticSwitchTests`, `PendingCredentialPersistenceTests` |
 | Claude 로컬 Code 목록 | `ClaudeDesktopSessionPreserver.swift`, `ClaudeDesktopProcesses.swift`; 구조 문서의 세션 보존 | `ClaudeDesktopSessionPreserverTests`, `EngineSessionPreservationTests` |
 | SwiftUI·앱 수명 | `AgentSwapApp/`, [디자인 기준](../../../docs/DESIGN.md) | 관련 Core fixture, 데모 UI와 접근성 확인 |
+| 릴리즈·패키징 | `scripts/package-release.sh`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, [기여 안내](../../../CONTRIBUTING.md) | Core 테스트, ZIP 복원 후 서명·양쪽 아키텍처·버전·최소 OS·체크섬 확인 |
 
 Core 파일은 `AgentSwapCore/Sources/AgentSwapCore/`, 테스트는 `AgentSwapCore/Tests/AgentSwapCoreTests/` 아래에 있습니다. 저장소·프로세스 변경에는 [ARCHITECTURE.md](../../../docs/ARCHITECTURE.md), 완료 주장에는 [VALIDATION.md](../../../docs/VALIDATION.md)를 확인합니다.
 
@@ -40,5 +41,7 @@ UI 확인에는 `build/AgentSwap.app`의 `--demo` 모드와 메모리 계정을 
 Codex 재실행 검증은 현재 작업을 호스팅하는 데스크톱까지 종료할 수 있습니다. 사용자와 준비된 검증 순서를 확인하고 정상 종료·소비자 종료·최신 백업·대상 적용·재실행·로그인과 사용량 확인을 각각 기록합니다. 두 번째 구독 계정이 없으면 두 계정 검증은 미완료로 남깁니다. Claude CLI 전환이나 로컬 목록 준비는 Claude 데스크톱의 로그인 변경·기존 대화 이어쓰기 성공을 뜻하지 않습니다.
 
 ## 전달
+
+릴리즈 패키징은 격리된 빌드에서 Universal 앱을 만들며 실행 중인 기본 앱을 교체하지 않습니다. 버전과 대상 커밋을 확인하고 실제 버전 태그를 추정해 만들지 않습니다. 현재 태그 workflow는 초안 prerelease와 ZIP·체크섬을 준비합니다. ad-hoc 서명을 Developer ID 서명·공증으로 표시하거나 패키징 성공을 v1 완료로 해석하지 않습니다. 인증서·로그인 자격 증명은 Git에 포함하지 않습니다.
 
 [기여 안내](../../../CONTRIBUTING.md)의 명령을 사용하고, 요청한 동작·검증 결과·남은 한계를 간결하게 보고합니다. 재현 가능한 소스·합성 fixture·문서만 Git에 포함합니다. 공개 준비에서는 ignore 규칙과 현재 index를 모두 검사합니다.

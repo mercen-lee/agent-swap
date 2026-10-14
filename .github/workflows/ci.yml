@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - '**'
   pull_request:
   workflow_dispatch:
 
@@ -27,6 +29,7 @@ jobs:
           xcodebuild -version
           xcrun swift --version
       - name: Test Core
+        timeout-minutes: 5
         run: ./scripts/test-core.sh
       - name: Build Release app
         run: ./scripts/build-app.sh

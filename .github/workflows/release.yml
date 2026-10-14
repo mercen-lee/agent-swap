@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft-release:
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      AGENTSWAP_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Validate version tag
+        shell: bash
+        run: |
+          if [[ ! "$AGENTSWAP_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo 'Use vMAJOR.MINOR.PATCH with an optional prerelease suffix.' >&2
+            exit 1
+          fi
+      - name: Test Core
+        timeout-minutes: 5
+        run: ./scripts/test-core.sh
+      - name: Package Universal app
+        id: package
+        env:
+          AGENTSWAP_RELEASE_BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/package-release.sh "${AGENTSWAP_TAG#v}"
+      - name: Verify release assets
+        env:
+          AGENTSWAP_ZIP: ${{ steps.package.outputs.zip_path }}
+          AGENTSWAP_CHECKSUMS: ${{ steps.package.outputs.checksum_path }}
+        run: |
+          test -s "$AGENTSWAP_ZIP"
+          cd "$(dirname "$AGENTSWAP_CHECKSUMS")"
+          shasum -a 256 -c SHA256SUMS
+      - name: Create draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTSWAP_ZIP: ${{ steps.package.outputs.zip_path }}
+          AGENTSWAP_CHECKSUMS: ${{ steps.package.outputs.checksum_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGENTSWAP_CHECKOUT_SHA="$(git rev-parse HEAD)"
+          AGENTSWAP_REMOTE_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$AGENTSWAP_TAG" --jq .sha)"
+          if [[ "$AGENTSWAP_CHECKOUT_SHA" != "$AGENTSWAP_REMOTE_SHA" ]]; then
+            echo 'The remote tag changed after checkout; release creation stopped.' >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/agentswap-release-notes.md" <<'NOTES'
+          AgentSwap development build for macOS 14 or later, with a Universal arm64/x86_64 app.
+
+          Extract the ZIP to obtain AgentSwap.app. Verify it with the included SHA256SUMS.
+          The app uses ad-hoc signing; Developer ID signing and notarization are not included.
+          The project remains in development. See README and docs/VALIDATION.md for known limitations.
+          NOTES
+          gh release create "$AGENTSWAP_TAG" "$AGENTSWAP_ZIP" "$AGENTSWAP_CHECKSUMS" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --draft --prerelease --latest=false \
+            --title "AgentSwap $AGENTSWAP_TAG" \
+            --notes-file "$RUNNER_TEMP/agentswap-release-notes.md"

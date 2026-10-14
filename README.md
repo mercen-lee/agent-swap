@@ -62,6 +62,22 @@ open build/AgentSwap.app --args --demo
 
 데모 계정은 메모리에만 보관하며 실제 인증 저장소·Keychain·사용량 API에 접근하지 않습니다. 실제 계정으로 돌아가려면 데모 앱을 종료하고 일반 모드로 다시 실행하세요.
 
+## 개발용 초안 릴리스
+
+릴리스 담당자가 `v0.1.0` 또는 `v0.1.0-beta.1` 형태의 버전 태그를 원격 저장소에 push하면 [릴리스 워크플로](.github/workflows/release.yml)가 Core 테스트와 Universal Release 패키징을 실행합니다. `arm64`·`x86_64`를 포함한 ad-hoc 서명 앱 ZIP과 `SHA256SUMS`가 GitHub의 **draft prerelease**에 첨부됩니다.
+
+워크플로는 태그를 만들거나 릴리스를 자동 공개하지 않습니다. 담당자가 GitHub의 Releases에서 초안·릴리스 노트·산출물을 검토한 뒤 공개 여부를 결정합니다. 태그의 숫자 기본 버전은 앱 버전에, Actions의 실행 번호는 빌드 번호에 사용합니다.
+
+같은 패키징을 로컬에서 실행할 수 있습니다.
+
+```sh
+./scripts/package-release.sh 0.1.0
+```
+
+결과는 `build/releases/0.1.0/AgentSwap-0.1.0-universal.zip`과 같은 폴더의 `SHA256SUMS`입니다. 기존 버전 폴더나 같은 태그의 릴리스 초안은 덮어쓰지 않습니다. 자세한 버전 규칙과 검토 절차는 [기여 안내](CONTRIBUTING.md)를 참고하세요.
+
+이 ZIP은 macOS 14 이상을 대상으로 하는 개발용 앱이며 Developer ID 서명·Apple 공증·DMG를 포함하지 않습니다. ad-hoc 서명 검증은 Gatekeeper의 확인된 개발자·공증 검증을 대신하지 않으므로, 다운로드한 앱을 열 때 macOS가 경고하거나 실행을 차단할 수 있습니다. [Apple의 Gatekeeper 안내](https://support.apple.com/ko-kr/102445)
+
 ## 사용 방법
 
 1. 대시보드의 **계정 추가**에서 제공자를 선택합니다. **현재 CLI 로그인 가져오기**는 기존 인증을 등록하고, **새 계정에 로그인**은 격리된 임시 프로필에서 브라우저 로그인을 진행합니다. 같은 계정을 다시 등록하면 별명과 후보 설정을 유지하며 인증을 갱신합니다.
@@ -103,7 +119,7 @@ Claude 네이티브 Keychain 명령은 고정 인자와 hex 표준 입력을 사
 - Claude 네이티브 저장 명령은 4094바이트로 제한돼 공유 MCP·플러그인 자료를 포함한 인증은 약 2 KiB까지만 지원합니다. 이 한도를 넘으면 원본을 보존하고 쓰기를 중단합니다.
 - API 키, 프로젝트별 계정 실행, 클라우드 동기화, 인증 내보내기는 지원 범위에서 제외합니다.
 - macOS 14·15에서의 실제 실행, 메뉴바에서 실제 계정 전환, 로그인 시 실행 후 재로그인 검증은 남아 있습니다.
-- Developer ID 서명·공증·DMG 배포는 아직 제공하지 않습니다.
+- 초안 릴리스의 개발용 ZIP에는 Developer ID 서명·공증·DMG를 포함하지 않습니다.
 
 테스트·빌드 통과와 실제 계정 검증은 구분합니다. 최신 범위와 남은 완료 조건은 [검증 기록](docs/VALIDATION.md)을 확인하세요.
 
@@ -115,7 +131,8 @@ Claude 네이티브 Keychain 명령은 고정 인자와 hex 표준 입력을 사
 | `AgentSwapApp/` | SwiftUI 화면·AppKit 생명주기·아이콘 |
 | `AgentSwapCore/Sources/AgentSwapCore/` | 모델·제공자 어댑터·저장소·자동 전환 엔진 |
 | `AgentSwapCore/Tests/AgentSwapCoreTests/` | 주입한 저장소와 합성 응답을 사용하는 테스트 |
-| `scripts/` | 앱 빌드·엔진 테스트·아이콘 재생성 |
+| `scripts/` | 앱 빌드·엔진 테스트·Universal ZIP 패키징·아이콘 재생성 |
+| `.github/workflows/` | CI와 태그 기반 초안 릴리스 |
 | `docs/` | 구조·디자인·검증 기록과 데모 화면 |
 | [AGENTS.md](AGENTS.md) | 코딩 에이전트의 저장소 작업 규칙 |
 | [agentswap-dev 스킬](.agents/skills/agentswap-dev/SKILL.md) | 프로젝트 전용 개발·검증 절차 |
