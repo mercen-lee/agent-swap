@@ -13,6 +13,11 @@ private enum AccountFilter: String, CaseIterable, Identifiable {
     }
 }
 
+private struct StatusMessage: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
 struct DashboardView: View {
     let model: AppModel
     @State private var filter: AccountFilter? = .all
@@ -22,6 +27,7 @@ struct DashboardView: View {
     @State private var isAddingAccount = false
     @State private var editingAccount: AccountRecord?
     @State private var deletingAccount: AccountRecord?
+    @State private var statusDetails: StatusMessage?
 
     private var filteredAccounts: [AccountRecord] {
         model.state.accounts.filter { account in
@@ -35,16 +41,23 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            accountList
-                .inspector(isPresented: $showsInspector) {
-                    inspector
-                        .inspectorColumnWidth(min: 260, ideal: 290, max: 360)
-                }
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                accountListContent
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    .navigationTitle(filter?.title ?? "전체 계정")
+                    .inspector(isPresented: $showsInspector) {
+                        inspector
+                            .inspectorColumnWidth(min: 260, ideal: 290, max: 360)
+                    }
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            }
+            .navigationSplitViewStyle(.balanced)
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            accountListFooter
         }
-        .navigationSplitViewStyle(.balanced)
         .searchable(text: $search, placement: .toolbar, prompt: "계정 검색")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -143,7 +156,7 @@ struct DashboardView: View {
         }
     }
 
-    private var accountList: some View {
+    private var accountListContent: some View {
         List(selection: $selectedID) {
             Section("현재 계정") {
                 ForEach(Provider.allCases.filter { filter?.provider == nil || $0 == filter?.provider }) { provider in
@@ -186,7 +199,6 @@ struct DashboardView: View {
             }
         }
         .listStyle(.inset)
-        .navigationTitle(filter?.title ?? "전체 계정")
         .overlay {
             if filteredAccounts.isEmpty {
                 ContentUnavailableView {
@@ -229,27 +241,50 @@ struct DashboardView: View {
                 .background(.bar)
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
-                if let message = model.message, !message.isEmpty {
-                    Text(message).font(.caption).textSelection(.enabled)
-                }
-                ClaudeCLIOnlySwitchAction(model: model)
-                HStack {
-                    Text("\(filteredAccounts.count)개 계정")
-                    Spacer()
-                    if model.isBusy {
-                        ProgressView().controlSize(.mini)
-                        Text("처리 중")
-                    }
-                }
-                .font(.caption)
+    }
+
+    private var accountListFooter: some View {
+        HStack(spacing: 10) {
+            Text("\(filteredAccounts.count)개 계정")
                 .foregroundStyle(.secondary)
+            if model.isBusy {
+                ProgressView().controlSize(.mini)
+                Text("처리 중").foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.bar)
+            if let message = model.message, !message.isEmpty {
+                Text(message)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                Button {
+                    statusDetails = StatusMessage(text: message)
+                } label: {
+                    Label("상태 메시지 전체 보기", systemImage: "info.circle")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .help("상태 메시지 전체 보기")
+                .accessibilityHint("전체 내용을 열어 읽고 복사합니다.")
+                .popover(item: $statusDetails, arrowEdge: .bottom) { details in
+                    ScrollView {
+                        Text(details.text)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    }
+                    .frame(width: 440, height: 240)
+                }
+            } else { Spacer(minLength: 0) }
+            ClaudeCLIOnlySwitchAction(model: model, compact: true)
         }
+        .font(.caption)
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
     }
 
     @ViewBuilder

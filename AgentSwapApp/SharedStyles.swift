@@ -103,6 +103,7 @@ struct AccountSwitchPresentation {
 
 struct ClaudeCLIOnlySwitchAction: View {
     let model: AppModel
+    var compact = false
     @State private var confirmingAccount: AccountRecord?
 
     var body: some View {
@@ -110,9 +111,11 @@ struct ClaudeCLIOnlySwitchAction: View {
             if let id = model.claudeCLIOnlySwitchTarget,
                let account = model.state.accounts.first(where: { $0.id == id && $0.provider == .claude }) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("기존 대화 파일을 그대로 두고 \(account.displayName)의 CLI 계정만 전환할 수 있습니다.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if !compact {
+                        Text("기존 대화 파일을 그대로 두고 \(account.displayName)의 CLI 계정만 전환할 수 있습니다.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
                         Button("CLI 계정만 전환", systemImage: "arrow.left.arrow.right") {
                             confirmingAccount = account
@@ -123,6 +126,7 @@ struct ClaudeCLIOnlySwitchAction: View {
                             .disabled(model.isBusy)
                     }
                     .controlSize(.small)
+                    .lineLimit(1)
                 }
             }
         }

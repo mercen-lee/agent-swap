@@ -7,7 +7,7 @@ public extension AppModel {
     }
 
     /// In-memory, deterministic fixture mode. Never reads or writes provider authentication.
-    static func preview() -> AppModel {
+    static func preview(claudeSessionIncompatible: Bool = false) -> AppModel {
         let now = Date()
         var state = PersistedState()
         let claudePersonal = AccountRecord(identity: .init(provider: .claude, userID: "demo-claude-1", workspaceID: "personal"), nickname: "개인 계정", email: "personal@example.com", workspaceName: "개인 워크스페이스", plan: "Max", createdAt: now.addingTimeInterval(-300), automaticSwitchEligible: true)
@@ -32,8 +32,19 @@ public extension AppModel {
         let adapters = Provider.allCases.map { provider in
             DemoProvider(provider: provider, current: state.accounts.first { $0.provider == provider }!, credential: credential, snapshots: values)
         }
-        return AppModel(adapters: adapters, secrets: DemoSecrets(values: credentials), store: DemoState(value: state))
+        let sessions: (any ClaudeDesktopSessionPreserving)? = claudeSessionIncompatible ? DemoSessionPreserver() : nil
+        return AppModel(adapters: adapters, secrets: DemoSecrets(values: credentials), store: DemoState(value: state),
+                        claudeSessions: sessions)
     }
+}
+
+/// Reproduces the preflight-unavailable UI without inspecting Desktop records or processes.
+private actor DemoSessionPreserver: ClaudeDesktopSessionPreserving {
+    func prepareForSwitch(source: AccountRecord?, target: AccountRecord, relaunch: Bool) async throws -> ClaudeDesktopSessionPreparation {
+        throw ClaudeDesktopSessionPreservationUnavailable(reason: .unsupportedRecordFields)
+    }
+    func verifyCanSwitchWithoutPreservingSessions(source: AccountRecord?, target: AccountRecord) async throws {}
+    func finish(_ preparation: ClaudeDesktopSessionPreparation, applied: Bool) async throws -> String? { nil }
 }
 
 private actor DemoSecrets: SecretStore {

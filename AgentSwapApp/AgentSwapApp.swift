@@ -6,11 +6,18 @@ import SwiftUI
 @main
 struct AgentSwapApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = AgentSwapApp.isDemo ? AppModel.preview() : AppModel.live()
+    @State private var model = AgentSwapApp.isDemo
+        ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible)
+        : AppModel.live()
 
     fileprivate static var isDemo: Bool {
         CommandLine.arguments.contains("--demo") ||
         (Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoMode") as? Bool == true)
+    }
+
+    private static var demoSessionIncompatible: Bool {
+        isDemo && (CommandLine.arguments.contains("--demo-session-incompatible") ||
+                   Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoSessionIncompatible") as? Bool == true)
     }
 
     private static var demoAppearance: ColorScheme? {
@@ -23,7 +30,8 @@ struct AgentSwapApp: App {
     }
 
     private static var initialWindowSize: CGSize {
-        let narrow = isDemo && (Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoNarrow") as? Bool == true)
+        let narrow = isDemo && (CommandLine.arguments.contains("--demo-narrow") ||
+                               Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoNarrow") as? Bool == true)
         return narrow ? CGSize(width: 760, height: 520) : CGSize(width: 960, height: 680)
     }
 
