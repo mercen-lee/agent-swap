@@ -46,6 +46,7 @@ struct MenuBarView: View {
                 Text(message).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            ClaudeCLIOnlySwitchAction(model: model)
             Divider()
             HStack {
                 Button("대시보드 열기", systemImage: "rectangle.on.rectangle") {

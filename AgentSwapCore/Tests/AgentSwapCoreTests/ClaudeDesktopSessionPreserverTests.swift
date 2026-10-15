@@ -7,19 +7,22 @@ private enum SessionPreserverFixtureError: Error { case expectedPrepared }
 private actor SessionPreserverProcesses: ClaudeDesktopConversationProcessControlling {
     let url: URL
     private var snapshots: [ClaudeDesktopConversationProcessSnapshot]
-    private var scanCount = 0
+    private(set) var scanCount = 0
     private var acceptsTermination = true
     private var terminationHook: (@Sendable () throws -> Void)?
     private(set) var terminationCount = 0
     private(set) var relaunchCount = 0
+    let version: String
 
-    init(url: URL, snapshots: [ClaudeDesktopConversationProcessSnapshot] = [.init()]) {
+    init(url: URL, snapshots: [ClaudeDesktopConversationProcessSnapshot] = [.init()],
+         version: String = ClaudeDesktopSessionPreserver.supportedVersion) {
         self.url = url
         self.snapshots = snapshots
+        self.version = version
     }
 
     func installation(at applicationURL: URL?) -> ClaudeDesktopConversationInstallation? {
-        .init(url: url, version: ClaudeDesktopSessionPreserver.supportedVersion)
+        .init(url: url, version: version)
     }
 
     func scan(applicationURL: URL) -> ClaudeDesktopConversationProcessSnapshot {
@@ -255,6 +258,203 @@ private func nativeFeatureSnapshotFixture() -> [String: Any] {
 
 @Suite("Automatic Claude Desktop local session preservation")
 struct ClaudeDesktopSessionPreserverTests {
+    @Test("Fresh format incompatibility has a typed diagnosis before quit or publication", arguments: [
+        "field", "cli", "cwd", "created", "activity", "session", "json", "size"
+    ])
+    func freshSchemaFailureOffersReadOnlyFallback(kind: String) async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession()
+        var object = try authObject(session.sourceBytes, name: "fixture")
+        let reason: ClaudeDesktopSessionPreservationUnavailable.Reason
+        switch kind {
+        case "field": object["futureMetadata"] = true; reason = .unsupportedRecordFields
+        case "cli": object.removeValue(forKey: "cliSessionId"); reason = .missingCLIIdentity
+        case "cwd": object["cwd"] = "relative"; reason = .invalidWorkingDirectory
+        case "created": object["createdAt"] = "2026-10-14"; reason = .invalidTimestamps
+        case "activity": object["lastActivityAt"] = NSNull(); reason = .invalidTimestamps
+        case "session": object["sessionId"] = "local_" + UUID().uuidString.lowercased(); reason = .invalidSessionIdentity
+        case "json": reason = .invalidRecordJSON
+        default: reason = .oversizedRecord
+        }
+        let bytes = kind == "json" ? Data("not-json".utf8) : kind == "size" ? Data(repeating: 32, count: 1_048_577) : try authData(object)
+        try fixture.disk.write(bytes, to: session.sourceURL)
+        let desktop = ClaudeDesktopConversationProcessIdentity(pid: 10, startedAt: 1)
+        let controller = SessionPreserverProcesses(url: fixture.app, snapshots: [.init(desktop: [desktop], related: [desktop], live: [desktop])])
+        let files = SessionPreserverFiles(), store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, files: files, processController: controller)
+        do {
+            _ = try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: true)
+            Issue.record("expected a typed format diagnosis")
+        } catch let unavailable as ClaudeDesktopSessionPreservationUnavailable {
+            #expect(unavailable.reason == reason)
+            #expect(!(unavailable.localizedDescription.contains(fixture.project.path)))
+        }
+        #expect(await controller.scanCount == 0)
+        #expect(await controller.terminationCount == 0)
+        #expect(await controller.relaunchCount == 0)
+        #expect(files.writes().isEmpty && files.deletions().isEmpty)
+        let reads = files.reads().count
+        try await store.verifyCanSwitchWithoutPreservingSessions(source: fixture.source, target: fixture.target)
+        let verifier: any ClaudeDesktopSessionPreserving = store
+        try await verifier.verifyCanSwitchWithoutPreservingSessions(source: fixture.source, target: fixture.target)
+        #expect(files.reads().count == reads)
+        #expect(await controller.scanCount == 0)
+        #expect(try fixture.disk.read(session.sourceURL) == bytes)
+        #expect(try fixture.disk.read(session.transcriptURL) == session.transcriptBytes)
+        #expect(try fixture.indexFiles(fixture.target).isEmpty)
+    }
+
+    @Test("An unsupported record found only in the target remains a pre-mutation diagnosis")
+    func targetOnlySchemaIsDiagnosed() async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession()
+        let targetURL = fixture.indexURL(session.localID, account: fixture.target)
+        let bytes = try fixture.record(localID: session.localID, cliID: session.cliID, extra: ["futureMetadata": true])
+        try fixture.disk.write(bytes, to: targetURL)
+        let controller = SessionPreserverProcesses(url: fixture.app), files = SessionPreserverFiles()
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, files: files, processController: controller)
+        await #expect(throws: ClaudeDesktopSessionPreservationUnavailable.self) { try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false) }
+        try await store.verifyCanSwitchWithoutPreservingSessions(source: fixture.source, target: fixture.target)
+        #expect(files.writes().isEmpty && files.deletions().isEmpty)
+        #expect(await controller.scanCount == 0)
+        #expect(try fixture.disk.read(targetURL) == bytes)
+        try fixture.assertSourceUnchanged(session)
+    }
+
+    @Test("A changed record after Desktop quit is fatal and cannot offer a CLI-only fallback")
+    func postQuitSchemaFailureIsFatal() async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession()
+        let changed = try fixture.record(localID: session.localID, cliID: session.cliID, extra: ["futureMetadata": true])
+        let desktop = ClaudeDesktopConversationProcessIdentity(pid: 10, startedAt: 1)
+        let controller = SessionPreserverProcesses(url: fixture.app, snapshots: [.init(desktop: [desktop], related: [desktop], live: [desktop]), .init()])
+        await controller.onTermination { try fixture.disk.write(changed, to: session.sourceURL) }
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: controller)
+        await #expect(throws: AgentSwapError.self) { try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: true) }
+        #expect(await controller.terminationCount == 1)
+        #expect(await controller.relaunchCount == 1)
+        #expect(try fixture.indexFiles(fixture.target).isEmpty)
+        #expect(try fixture.disk.read(session.sourceURL) == changed)
+        #expect(try fixture.disk.read(session.transcriptURL) == session.transcriptBytes)
+    }
+
+    @Test("CLI-only validation blocks any pending journal without reading records", arguments: ["unknown", "prepared", "committed"])
+    func cliOnlyCannotBypassRecovery(kind: String) async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession()
+        let journalURL = fixture.home.appendingPathComponent("Library/Application Support/AgentSwap/claude-session-preservation/pending.json")
+        if kind == "unknown" { try fixture.disk.write(Data("unknown recovery data".utf8), to: journalURL) }
+        else {
+            let initial = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: SessionPreserverProcesses(url: fixture.app))
+            _ = try await initial.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false)
+            if kind == "committed" {
+                var journal = try authObject(#require(try fixture.disk.read(journalURL)), name: "fixture")
+                journal["committed"] = true
+                try fixture.disk.write(authData(journal), to: journalURL)
+            }
+        }
+        let journalBytes = try fixture.disk.read(journalURL)
+        let controller = SessionPreserverProcesses(url: fixture.app), files = SessionPreserverFiles()
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, files: files, processController: controller)
+        await #expect(throws: AgentSwapError.self) { try await store.verifyCanSwitchWithoutPreservingSessions(source: fixture.source, target: fixture.target) }
+        #expect(files.reads().isEmpty && files.writes().isEmpty && files.deletions().isEmpty)
+        #expect(await controller.scanCount == 0)
+        #expect(await controller.terminationCount == 0)
+        #expect(await controller.relaunchCount == 0)
+        #expect(try fixture.disk.read(journalURL) == journalBytes)
+        try fixture.assertSourceUnchanged(session)
+    }
+
+    @Test("Unknown records inside a recovery journal remain fatal")
+    func unknownJournalRecordIsFatal() async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession()
+        let initial = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: SessionPreserverProcesses(url: fixture.app))
+        _ = try await initial.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false)
+        let journalURL = fixture.home.appendingPathComponent("Library/Application Support/AgentSwap/claude-session-preservation/pending.json")
+        var journal = try authObject(#require(try fixture.disk.read(journalURL)), name: "fixture")
+        var entries = try #require(journal["entries"] as? [[String: Any]])
+        var record = try authObject(session.sourceBytes, name: "fixture")
+        record["futureMetadata"] = true
+        entries[0]["sourceData"] = try authData(record).base64EncodedString()
+        journal["entries"] = entries
+        let bytes = try authData(journal)
+        try fixture.disk.write(bytes, to: journalURL)
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: SessionPreserverProcesses(url: fixture.app))
+        await #expect(throws: AgentSwapError.self) { try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false) }
+        #expect(try fixture.disk.read(journalURL) == bytes)
+        #expect(try fixture.disk.read(fixture.indexURL(session.localID, account: fixture.target)) != nil)
+    }
+
+    @Test("CLI-only verification retains file ownership and symlink safety", arguments: [false, true])
+    func unsafeIndexCannotBypassPreservation(hardlink: Bool) async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession()
+        if hardlink {
+            try FileManager.default.linkItem(at: session.sourceURL, to: fixture.home.appendingPathComponent("index-hardlink"))
+        } else {
+            try fixture.disk.delete(session.sourceURL)
+            try FileManager.default.createSymbolicLink(at: session.sourceURL, withDestinationURL: session.transcriptURL)
+        }
+        let controller = SessionPreserverProcesses(url: fixture.app), files = SessionPreserverFiles()
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, files: files, processController: controller)
+        await #expect(throws: AgentSwapError.self) { try await store.verifyCanSwitchWithoutPreservingSessions(source: fixture.source, target: fixture.target) }
+        await #expect(throws: AgentSwapError.self) { try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false) }
+        #expect(files.writes().isEmpty && files.deletions().isEmpty)
+        #expect(await controller.scanCount == 0)
+        #expect(try fixture.disk.read(session.transcriptURL) == session.transcriptBytes)
+    }
+
+    @Test("An unsupported Desktop version is diagnosed before process termination")
+    func unsupportedVersionHasSafeDiagnosis() async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let session = try fixture.addSession(), controller = SessionPreserverProcesses(url: fixture.app, version: "unsupported-fixture")
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: controller)
+        do {
+            _ = try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: true)
+            Issue.record("expected version diagnosis")
+        } catch let unavailable as ClaudeDesktopSessionPreservationUnavailable { #expect(unavailable.reason == .unsupportedDesktopVersion) }
+        #expect(await controller.scanCount == 0)
+        #expect(await controller.terminationCount == 0)
+        try await store.verifyCanSwitchWithoutPreservingSessions(source: fixture.source, target: fixture.target)
+        try fixture.assertSourceUnchanged(session)
+    }
+
+    @Test("Installed serializer title/history metadata is preserved without adding execution settings")
+    func auditedPassiveMetadataIsPreserved() async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let extra: [String: Any] = ["previousTitles": ["Earlier synthetic title", "Another synthetic title"],
+                                  "lastAssistantUuid": UUID().uuidString.lowercased(), "titleTurn": 4,
+                                  "titleCheck": ["count": 2, "lastAt": 1_700_000_000_123, "lastTurn": 3], "titleSuggestionsOff": true]
+        let session = try fixture.addSession(extra: extra)
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: SessionPreserverProcesses(url: fixture.app))
+        let result = try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false)
+        let target = try authObject(#require(try fixture.disk.read(fixture.indexURL(session.localID, account: fixture.target))), name: "fixture")
+        for (key, value) in extra { #expect((target[key] as? NSObject) == (value as? NSObject)) }
+        _ = try await store.finish(result, applied: true)
+        try fixture.assertSourceUnchanged(session)
+    }
+
+    @Test("Malformed passive metadata still fails closed", arguments: ["titles", "assistant", "turn", "check", "flag"])
+    func passiveMetadataShapeIsNarrow(kind: String) async throws {
+        let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }
+        let extra: [String: Any]
+        switch kind {
+        case "titles": extra = ["previousTitles": [1]]
+        case "assistant": extra = ["lastAssistantUuid": 1]
+        case "turn": extra = ["titleTurn": true]
+        case "check": extra = ["titleCheck": ["count": 1, "lastAt": 1, "lastTurn": 1, "futureField": true]]
+        default: extra = ["titleSuggestionsOff": "true"]
+        }
+        let session = try fixture.addSession(extra: extra)
+        let store = ClaudeDesktopSessionPreserver(homeURL: fixture.home, processController: SessionPreserverProcesses(url: fixture.app))
+        do {
+            _ = try await store.prepareForSwitch(source: fixture.source, target: fixture.target, relaunch: false)
+            Issue.record("expected passive metadata diagnosis")
+        } catch let unavailable as ClaudeDesktopSessionPreservationUnavailable { #expect(unavailable.reason == .unsupportedRecordMetadata) }
+        try fixture.assertSourceUnchanged(session)
+        #expect(try fixture.indexFiles(fixture.target).isEmpty)
+    }
+
     @Test("The current account and an account without source indices need no quit", arguments: [true, false])
     func noWorkDoesNotQuit(sameAccount: Bool) async throws {
         let fixture = try SessionPreserverFixture(); defer { fixture.cleanup() }

@@ -12,6 +12,51 @@ public enum ClaudeDesktopSessionPreparation: Sendable, Equatable {
 public protocol ClaudeDesktopSessionPreserving: Sendable {
     func prepareForSwitch(source: AccountRecord?, target: AccountRecord, relaunch: Bool) async throws -> ClaudeDesktopSessionPreparation
     func finish(_ preparation: ClaudeDesktopSessionPreparation, applied: Bool) async throws -> String?
+    func verifyCanSwitchWithoutPreservingSessions(source: AccountRecord?, target: AccountRecord) async throws
+}
+
+public extension ClaudeDesktopSessionPreserving {
+    func verifyCanSwitchWithoutPreservingSessions(source: AccountRecord?, target: AccountRecord) async throws {
+        throw AgentSwapError.unsupported("대화 보존 없이 전환하는 안전 조건을 확인하지 못했습니다.")
+    }
+}
+
+/// This error is offered only from the fresh, read-only planning stage. Recovery, filesystem
+/// safety and any failure after Desktop termination or publication remain fatal errors.
+public struct ClaudeDesktopSessionPreservationUnavailable: Error, Sendable, LocalizedError, Equatable {
+    public enum Reason: Sendable, Equatable {
+        case oversizedRecord, invalidRecordJSON, unsupportedRecordFields, invalidSessionIdentity
+        case missingCLIIdentity, invalidWorkingDirectory, invalidTimestamps, unsupportedRecordMetadata
+        case unsupportedPermissions, activeExecutionAssociation, unconfirmedImport
+        case unsupportedSpawnSettings, unsupportedPromptSettings, unsupportedToolSettings
+        case missingSharedTranscript, unsupportedDesktopVersion
+    }
+    public let reason: Reason
+    public init(reason: Reason) { self.reason = reason }
+    public var errorDescription: String? {
+        switch reason {
+        case .oversizedRecord: "로컬 Code 대화 목록이 지원하는 크기를 초과해 자동 보존을 사용할 수 없습니다."
+        case .invalidRecordJSON: "로컬 Code 대화 목록의 JSON 형식을 확인하지 못해 자동 보존을 사용할 수 없습니다."
+        case .unsupportedRecordFields: "지원하지 않는 로컬 Code 대화 필드가 있어 자동 보존을 사용할 수 없습니다."
+        case .invalidSessionIdentity: "로컬 Code 대화 ID와 파일 연결을 확인하지 못해 자동 보존을 사용할 수 없습니다."
+        case .missingCLIIdentity: "로컬 Code 대화의 CLI 기록 ID를 확인하지 못해 자동 보존을 사용할 수 없습니다."
+        case .invalidWorkingDirectory: "로컬 Code 대화의 작업 폴더 형식을 확인하지 못해 자동 보존을 사용할 수 없습니다."
+        case .invalidTimestamps: "로컬 Code 대화의 생성·활동 시각 형식을 확인하지 못해 자동 보존을 사용할 수 없습니다."
+        case .unsupportedRecordMetadata: "로컬 Code 대화 메타데이터의 형식을 지원하지 않아 자동 보존을 사용할 수 없습니다."
+        case .unsupportedPermissions: "로컬 Code 대화의 승인 설정 형식을 지원하지 않아 자동 보존을 사용할 수 없습니다."
+        case .activeExecutionAssociation: "로컬 Code 대화에 중단된 실행 또는 원격 제어 연결이 남아 자동 보존을 사용할 수 없습니다."
+        case .unconfirmedImport: "로컬 기록으로 확인되지 않은 가져오기 대화라 자동 보존을 사용할 수 없습니다."
+        case .unsupportedSpawnSettings: "로컬 Code 대화의 시작 설정 형식을 지원하지 않아 자동 보존을 사용할 수 없습니다."
+        case .unsupportedPromptSettings: "로컬 Code 대화의 프롬프트 설정 형식을 지원하지 않아 자동 보존을 사용할 수 없습니다."
+        case .unsupportedToolSettings: "로컬 Code 대화의 도구 설정 형식을 지원하지 않아 자동 보존을 사용할 수 없습니다."
+        case .missingSharedTranscript: "로컬 Code 대화의 공유 기록을 찾지 못해 자동 보존을 사용할 수 없습니다."
+        case .unsupportedDesktopVersion: "Claude 데스크톱 2.37337.1의 로컬 Code 대화 보존만 지원합니다."
+        }
+    }
+}
+
+private struct SessionRecordCompatibilityIssue: Error {
+    let reason: ClaudeDesktopSessionPreservationUnavailable.Reason
 }
 
 private struct SessionPreservationEntry: Codable {
@@ -67,10 +112,14 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         if let source { try validateIdentity(source.identity) }
         if let recovery = try await recoverPending(actual: source?.identity, relaunch: relaunch) { return recovery }
         guard let source, source.identity != target.identity else { return .notNeeded }
-        var plan = try inventory(source: source.identity, target: target.identity)
+        var plan: (entries: [SessionPreservationEntry], cliIDs: Set<String>, transcripts: [SharedSessionTranscript])
+        do { plan = try inventory(source: source.identity, target: target.identity) }
+        catch let issue as SessionRecordCompatibilityIssue {
+            throw ClaudeDesktopSessionPreservationUnavailable(reason: issue.reason)
+        }
         guard !plan.entries.isEmpty else { return .notNeeded }
         guard let installation = await processes.installation(at: applicationURL), installation.version == Self.supportedVersion else {
-            throw AgentSwapError.unsupported("Claude 데스크톱 2.37337.1의 로컬 Code 대화 보존만 지원합니다.")
+            throw ClaudeDesktopSessionPreservationUnavailable(reason: .unsupportedDesktopVersion)
         }
         let initial = await processes.scan(applicationURL: installation.url)
         guard initial.reliable else { throw failure("Claude 프로세스를 확인하지 못해 대화와 계정 전환을 보류했습니다.") }
@@ -119,8 +168,36 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
             }
             if wasRunning { try? await processes.relaunch(at: installation.url) }
             if !recovered { throw failure("대화 보존이 중단되어 복구 기록을 남겼습니다. 계정 전환을 진행하지 않았습니다.") }
+            if let issue = error as? SessionRecordCompatibilityIssue { throw fatalRecordIssue(issue) }
             throw error
         }
+    }
+    public func verifyCanSwitchWithoutPreservingSessions(source: AccountRecord?, target: AccountRecord) async throws {
+        try Task.checkCancellation()
+        guard !operating else { throw failure("다른 Claude 대화 보존 작업이 진행 중입니다.") }
+        guard let source else { throw failure("현재 Claude 계정을 확인한 뒤 다시 전환해 주세요.") }
+        try validateIdentity(source.identity); try validateIdentity(target.identity)
+        try directory(stateRoot, create: false)
+        var journalInfo = stat()
+        if lstat(journalURL.path, &journalInfo) == 0 {
+            // Existence is sufficient: do not reinterpret unknown, committed or partial recovery
+            // as permission to bypass it, and do not read any embedded conversation data.
+            throw failure("대화 보존 복구 기록이 남아 CLI 계정만 전환할 수 없습니다. 먼저 복구를 완료해 주세요.")
+        }
+        guard errno == ENOENT else { throw failure("대화 보존 복구 기록의 상태를 확인하지 못했습니다.") }
+        for identity in [source.identity, target.identity] {
+            let url = bucket(identity)
+            for name in try names(url) where name.hasPrefix("local_") && name.hasSuffix(".json") {
+                var info = stat()
+                let path = url.appendingPathComponent(name)
+                guard lstat(path.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+                      info.st_uid == geteuid(), info.st_nlink == 1, info.st_size >= 0 else {
+                    throw failure("대화 파일의 링크와 소유권을 확인하지 못해 CLI 계정만 전환할 수 없습니다.")
+                }
+            }
+        }
+        try directory(home.appendingPathComponent(".claude/projects", isDirectory: true), create: false)
+        // No record contents, source transcripts, process scan/quit or files are changed here.
     }
     public func finish(_ preparation: ClaudeDesktopSessionPreparation, applied: Bool) async throws -> String? {
         guard case .prepared(let id, _) = preparation else { return nil }
@@ -177,8 +254,10 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         guard journal.version == 1, journal.source != journal.target, !journal.entries.isEmpty,
               Set(journal.entries.map(\.filename)).count == journal.entries.count else { throw failure("대화 보존 기록의 형식을 지원하지 않습니다.") }
         for entry in journal.entries {
-            _ = try record(entry.sourceData, filename: entry.filename)
-            _ = try record(entry.targetData, filename: entry.filename)
+            do {
+                _ = try record(entry.sourceData, filename: entry.filename)
+                _ = try record(entry.targetData, filename: entry.filename)
+            } catch let issue as SessionRecordCompatibilityIssue { throw fatalRecordIssue(issue) }
         }
         return journal
     }
@@ -212,13 +291,13 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         let deleted = try tombstones(sourceFiles + targetFiles)
         var targets: [String: (String, String)] = [:]
         for name in targetFiles where name.hasPrefix("local_") && name.hasSuffix(".json") {
-            guard let data = try read(targetBucket.appendingPathComponent(name)) else { throw failure("대상 대화 목록이 변경되었습니다.") }
+            guard let data = try read(targetBucket.appendingPathComponent(name), reportOversizedRecord: true) else { throw failure("대상 대화 목록이 변경되었습니다.") }
             let object = try record(data, filename: name)
             targets[name] = (object["sessionId"] as! String, object["cliSessionId"] as! String)
         }
         var entries: [SessionPreservationEntry] = [], ids = Set<String>(), transcripts: [SharedSessionTranscript] = []
         for name in sourceFiles.sorted() where name.hasPrefix("local_") && name.hasSuffix(".json") {
-            guard let data = try read(sourceBucket.appendingPathComponent(name)) else { throw failure("원래 대화 목록이 변경되었습니다.") }
+            guard let data = try read(sourceBucket.appendingPathComponent(name), reportOversizedRecord: true) else { throw failure("원래 대화 목록이 변경되었습니다.") }
             var object = try record(data, filename: name)
             let cardID = object["sessionId"] as! String, cliID = object["cliSessionId"] as! String
             if deleted.contains(String(cardID.dropFirst(6)).lowercased()) || deleted.contains(cliID.lowercased()) { continue }
@@ -227,7 +306,7 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
                 continue // Preserve user title/archive edits and timestamps in an existing destination.
             }
             guard !targets.values.contains(where: { $0.0 == cardID || $0.1 == cliID }) else { throw failure("대상 대화 ID가 충돌해 보존을 중단했습니다.") }
-            guard let transcript = try sharedTranscript(cliID: cliID, record: object) else { throw failure("기존 로컬 대화의 공유 기록을 찾지 못했습니다.") }
+            guard let transcript = try sharedTranscript(cliID: cliID, record: object) else { throw incompatible(.missingSharedTranscript) }
             object["bridgeSessionIds"] = []
             for key in Self.detachedKeys { object.removeValue(forKey: key) }
             object["permissionMode"] = "default"
@@ -247,58 +326,75 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         return (entries, ids, transcripts)
     }
     private static let detachedKeys: Set<String> = ["cloudSessionId", "outboundCCRRemoteId", "remoteControlSpawn", "remoteControlDescendant", "remoteControlAutoEligible", "remoteControlUserEnabled", "remoteControlLiveAtUpdateQuit", "remoteControlUserToggled", "remoteControlUserRequested", "remoteControlConnecting", "remoteControlAvailable", "remoteControlStarted", "startedViaRemoteControl", "remoteControlEnabled", "remoteControlAutoEnabled", "remoteControlAutoSource", "bridgeSessionId", "bridgeSessionUrl", "bridgeEpoch", "emailAddress", "envScopeId", "startedFromEnvironmentId"]
-    private static let normalKeys: Set<String> = ["sessionId", "cliSessionId", "cwd", "originCwd", "title", "titleSource", "createdAt", "lastActivityAt", "lastFocusedAt", "indexedAt", "isArchived", "isStarred", "model", "effort", "branch", "sourceBranch", "worktreePath", "worktreeName", "worktreeLazy", "gitAnchors", "gitAnchorsLookupOnly", "gitAnchorsFolderRealpath", "prs", "completedTurns", "permissionMode", "alwaysAllowedReasons", "sessionPermissionUpdates", "forkedFromSessionId", "forkedAtMessageUuid", "rewindEdges", "transcriptModelStates", "transcriptCuts", "contextWindow", "bridgeSessionIds", "cliBinaryPin", "importedFrom", "resumeConfirmed", "interruptedAwaitingPerson", "steeredByRemoteClient", "spawnSeed", "lastSpawnRootDetected", "bypassChosenInApp", "autoChosenInApp", "chromePermissionMode", "chromeAllowedDomains", "promptAppendSnapshot", "toolSurfaceSnapshot"]
+    private static let normalKeys: Set<String> = ["sessionId", "cliSessionId", "cwd", "originCwd", "title", "titleSource", "createdAt", "lastActivityAt", "lastFocusedAt", "indexedAt", "isArchived", "isStarred", "model", "effort", "branch", "sourceBranch", "worktreePath", "worktreeName", "worktreeLazy", "gitAnchors", "gitAnchorsLookupOnly", "gitAnchorsFolderRealpath", "prs", "completedTurns", "permissionMode", "alwaysAllowedReasons", "sessionPermissionUpdates", "forkedFromSessionId", "forkedAtMessageUuid", "rewindEdges", "transcriptModelStates", "transcriptCuts", "contextWindow", "bridgeSessionIds", "cliBinaryPin", "importedFrom", "resumeConfirmed", "interruptedAwaitingPerson", "steeredByRemoteClient", "spawnSeed", "lastSpawnRootDetected", "bypassChosenInApp", "autoChosenInApp", "chromePermissionMode", "chromeAllowedDomains", "promptAppendSnapshot", "toolSurfaceSnapshot", "previousTitles", "lastAssistantUuid", "titleTurn", "titleCheck", "titleSuggestionsOff"]
     private func record(_ data: Data, filename: String) throws -> [String: Any] {
-        guard data.count <= 1_024 * 1_024,
-              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).isSubset(of: Self.normalKeys.union(Self.detachedKeys)),
-              let id = object["sessionId"] as? String, id.hasPrefix("local_"), UUID(uuidString: String(id.dropFirst(6))) != nil,
-              filename == id + ".json", let cliID = object["cliSessionId"] as? String, UUID(uuidString: cliID) != nil,
-              let cwd = object["cwd"] as? String, cwd.hasPrefix("/"), !cwd.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-              validTimestamp(object["createdAt"]), validTimestamp(object["lastActivityAt"]) else { throw failure("알 수 없는 로컬 Code 대화 형식 또는 실행 연결을 발견해 보존을 중단했습니다.") }
-        if let title = object["title"], !(title is String) { throw failure("대화 제목의 형식을 지원하지 않습니다.") }
+        guard data.count <= 1_024 * 1_024 else { throw incompatible(.oversizedRecord) }
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw incompatible(.invalidRecordJSON) }
+        guard Set(object.keys).isSubset(of: Self.normalKeys.union(Self.detachedKeys)) else { throw incompatible(.unsupportedRecordFields) }
+        guard let id = object["sessionId"] as? String, id.hasPrefix("local_"), UUID(uuidString: String(id.dropFirst(6))) != nil,
+              filename == id + ".json" else { throw incompatible(.invalidSessionIdentity) }
+        guard let cliID = object["cliSessionId"] as? String, UUID(uuidString: cliID) != nil else { throw incompatible(.missingCLIIdentity) }
+        guard let cwd = object["cwd"] as? String, cwd.hasPrefix("/"),
+              !cwd.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw incompatible(.invalidWorkingDirectory) }
+        guard validTimestamp(object["createdAt"]), validTimestamp(object["lastActivityAt"]) else { throw incompatible(.invalidTimestamps) }
+        if let title = object["title"], !(title is String) { throw incompatible(.unsupportedRecordMetadata) }
+        // Claude 2.37337.1 serializer CA / readers xD, Kk, gO and hO. These are title/history
+        // metadata; they carry no permission grants, process ownership or execution resume state.
+        if let titles = object["previousTitles"] {
+            guard let values = titles as? [String], values.count <= 10,
+                  values.allSatisfy({ !$0.isEmpty && $0.unicodeScalars.count <= 2_000 }) else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["lastAssistantUuid"] {
+            guard value is String else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["titleTurn"], !validTimestamp(value) { throw incompatible(.unsupportedRecordMetadata) }
+        if let value = object["titleCheck"] {
+            guard let check = value as? [String: Any], Set(check.keys) == ["count", "lastAt", "lastTurn"],
+                  check.values.allSatisfy(validTimestamp) else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["titleSuggestionsOff"], !isBoolean(value) { throw incompatible(.unsupportedRecordMetadata) }
         if let archive = object["isArchived"] {
-            guard let value = archive as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { throw failure("대화 보관 상태의 형식을 지원하지 않습니다.") }
+            guard let value = archive as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { throw incompatible(.unsupportedRecordMetadata) }
         }
         if let permission = object["permissionMode"] {
-            guard let mode = permission as? String, Self.permissionModes.contains(mode) else { throw failure("대화 실행 권한의 형식을 지원하지 않습니다.") }
+            guard let mode = permission as? String, Self.permissionModes.contains(mode) else { throw incompatible(.unsupportedPermissions) }
         }
-        if let reasons = object["alwaysAllowedReasons"], !(reasons is [String]) { throw failure("대화 실행 승인 기록의 형식을 지원하지 않습니다.") }
+        if let reasons = object["alwaysAllowedReasons"], !(reasons is [String]) { throw incompatible(.unsupportedPermissions) }
         if let updates = object["sessionPermissionUpdates"] {
             guard let values = updates as? [[String: Any]], values.allSatisfy({ value in
                 guard let type = value["type"] as? String else { return false }
                 return ["addDirectories", "removeDirectories", "addRules", "removeRules", "replaceRules", "setMode"].contains(type)
-            }) else { throw failure("대화 실행 권한 갱신 기록의 형식을 지원하지 않습니다.") }
+            }) else { throw incompatible(.unsupportedPermissions) }
         }
-        if let bridge = object["bridgeSessionIds"], !(bridge is [String]) { throw failure("원격 연결 기록의 형식을 지원하지 않습니다.") }
+        if let bridge = object["bridgeSessionIds"], !(bridge is [String]) { throw incompatible(.unsupportedRecordMetadata) }
         for key in ["interruptedAwaitingPerson", "steeredByRemoteClient"] {
-            if let value = object[key], !(value is NSNull) { throw failure("중단된 실행 또는 원격 제어 연결이 남아 대화 보존을 보류했습니다.") }
+            if let value = object[key], !(value is NSNull) { throw incompatible(.activeExecutionAssociation) }
         }
         if let value = object["resumeConfirmed"] {
-            guard let confirmed = value as? NSNumber, CFGetTypeID(confirmed) == CFBooleanGetTypeID() else { throw failure("가져온 대화의 확인 상태를 지원하지 않습니다.") }
+            guard let confirmed = value as? NSNumber, CFGetTypeID(confirmed) == CFBooleanGetTypeID() else { throw incompatible(.unconfirmedImport) }
         }
         if let value = object["importedFrom"] {
             guard let origin = value as? String, ["local-1p-code", "terminal-cli"].contains(origin),
                   (object["resumeConfirmed"] as? NSNumber)?.boolValue == true else {
-                throw failure("로컬 기록으로 확정되지 않은 가져오기 대화의 보존을 보류했습니다.")
+                throw incompatible(.unconfirmedImport)
             }
         }
         for key in ["lastSpawnRootDetected", "bypassChosenInApp"] {
-            if let value = object[key], !isBoolean(value) { throw failure("이전 실행의 확인 상태를 지원하지 않습니다.") }
+            if let value = object[key], !isBoolean(value) { throw incompatible(.unsupportedRecordMetadata) }
         }
         if let value = object["autoChosenInApp"], !isBoolean(value), (value as? String) != "adopted" {
-            throw failure("이전 자동 승인 상태를 지원하지 않습니다.")
+            throw incompatible(.unsupportedRecordMetadata)
         }
         if let value = object["chromePermissionMode"] {
-            guard let mode = value as? String, ["ask", "skip_all_permission_checks", "follow_a_plan"].contains(mode) else { throw failure("브라우저 실행 승인 형식을 지원하지 않습니다.") }
+            guard let mode = value as? String, ["ask", "skip_all_permission_checks", "follow_a_plan"].contains(mode) else { throw incompatible(.unsupportedPermissions) }
         }
-        if let domains = object["chromeAllowedDomains"], !(domains is [String]) { throw failure("브라우저 승인 도메인 형식을 지원하지 않습니다.") }
+        if let domains = object["chromeAllowedDomains"], !(domains is [String]) { throw incompatible(.unsupportedPermissions) }
         if let value = object["spawnSeed"] {
             guard let seed = value as? [String: Any], Set(seed.keys).isSubset(of: ["systemPrompt", "systemPromptAppend", "worktreeHookBased"]),
                   seed["systemPrompt"] == nil || seed["systemPrompt"] is String,
                   seed["systemPromptAppend"] == nil || seed["systemPromptAppend"] is String,
                   seed["worktreeHookBased"].map(isBoolean) ?? true else {
-                throw failure("로컬 대화의 시작 설정 형식을 지원하지 않습니다.")
+                throw incompatible(.unsupportedSpawnSettings)
             }
         }
         if let value = object["promptAppendSnapshot"] {
@@ -307,7 +403,7 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
                   snapshot["cliVersion"] is String || snapshot["cliVersion"] is NSNull,
                   snapshot["settingsKey"] is String, let tools = snapshot["toolSets"] as? [String: Any],
                   Set(tools.keys).isSubset(of: ["turnBox", "sideSessions"]), tools.values.allSatisfy(isBoolean) else {
-                throw failure("로컬 대화의 프롬프트 설정 형식을 지원하지 않습니다.")
+                throw incompatible(.unsupportedPromptSettings)
             }
         }
         if let value = object["toolSurfaceSnapshot"] {
@@ -323,7 +419,7 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
                   time.doubleValue > 0, time.doubleValue.rounded() == time.doubleValue,
                   time.doubleValue <= 9_007_199_254_740_991,
                   time.doubleValue <= Date.now.timeIntervalSince1970 * 1_000 + 86_400_000 else {
-                throw failure("로컬 대화의 도구 설정 형식을 지원하지 않습니다.")
+                throw incompatible(.unsupportedToolSettings)
             }
         }
         return object
@@ -455,15 +551,23 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
             guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == geteuid(), info.st_mode & 0o022 == 0 else { throw failure("대화 보존 폴더의 소유권 또는 링크가 안전하지 않습니다.") }
         }
     }
-    private func read(_ url: URL, maximum: Int = 1_024 * 1_024) throws -> Data? {
+    private func read(_ url: URL, maximum: Int = 1_024 * 1_024, reportOversizedRecord: Bool = false) throws -> Data? {
         try directory(url.deletingLastPathComponent(), create: false)
         var info = stat()
         if lstat(url.path, &info) != 0 {
             if errno == ENOENT { return nil }
             throw failure("대화 기록을 확인하지 못했습니다.")
         }
-        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid(), info.st_nlink == 1, info.st_size >= 0, info.st_size <= maximum else { throw failure("대화 파일의 링크와 소유권 또는 크기를 확인하지 못했습니다.") }
-        guard let data = try files.read(url), data.count <= maximum else { throw failure("대화 파일을 안전하게 읽지 못했습니다.") }
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid(), info.st_nlink == 1, info.st_size >= 0 else { throw failure("대화 파일의 링크와 소유권을 확인하지 못했습니다.") }
+        if info.st_size > maximum {
+            if reportOversizedRecord { throw incompatible(.oversizedRecord) }
+            throw failure("대화 파일의 크기를 확인하지 못했습니다.")
+        }
+        guard let data = try files.read(url) else { throw failure("대화 파일을 안전하게 읽지 못했습니다.") }
+        if data.count > maximum {
+            if reportOversizedRecord { throw incompatible(.oversizedRecord) }
+            throw failure("대화 파일의 크기를 확인하지 못했습니다.")
+        }
         return data
     }
     private func publish(_ data: Data, to url: URL) throws {
@@ -482,4 +586,11 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         guard try read(url) == data else { throw failure("게시한 대화 목록을 확인하지 못했습니다.") }
     }
     private func failure(_ message: String) -> AgentSwapError { .storage(message) }
+    private func incompatible(_ reason: ClaudeDesktopSessionPreservationUnavailable.Reason) -> SessionRecordCompatibilityIssue {
+        .init(reason: reason)
+    }
+    private func fatalRecordIssue(_ issue: SessionRecordCompatibilityIssue) -> AgentSwapError {
+        failure("대화 보존의 완료 또는 복구를 중단했습니다. " +
+                (ClaudeDesktopSessionPreservationUnavailable(reason: issue.reason).errorDescription ?? "대화 형식을 지원하지 않습니다."))
+    }
 }

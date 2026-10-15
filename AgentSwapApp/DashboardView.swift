@@ -97,6 +97,11 @@ struct DashboardView: View {
                 selectedID = filteredAccounts.first?.id
             }
         }
+        .onChange(of: selectedID) {
+            if let offered = model.claudeCLIOnlySwitchTarget, selectedID != offered {
+                model.dismissClaudeCLIOnlySwitch()
+            }
+        }
     }
 
     private var sidebar: some View {
@@ -229,6 +234,7 @@ struct DashboardView: View {
                 if let message = model.message, !message.isEmpty {
                     Text(message).font(.caption).textSelection(.enabled)
                 }
+                ClaudeCLIOnlySwitchAction(model: model)
                 HStack {
                     Text("\(filteredAccounts.count)개 계정")
                     Spacer()
