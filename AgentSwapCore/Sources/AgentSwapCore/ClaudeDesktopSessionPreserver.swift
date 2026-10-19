@@ -175,8 +175,8 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
     public func verifyCanSwitchWithoutPreservingSessions(source: AccountRecord?, target: AccountRecord) async throws {
         try Task.checkCancellation()
         guard !operating else { throw failure("다른 Claude 대화 보존 작업이 진행 중입니다.") }
-        guard let source else { throw failure("현재 Claude 계정을 확인한 뒤 다시 전환해 주세요.") }
-        try validateIdentity(source.identity); try validateIdentity(target.identity)
+        if let source { try validateIdentity(source.identity) }
+        try validateIdentity(target.identity)
         try directory(stateRoot, create: false)
         var journalInfo = stat()
         if lstat(journalURL.path, &journalInfo) == 0 {
@@ -185,19 +185,7 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
             throw failure("대화 보존 복구 기록이 남아 CLI 계정만 전환할 수 없습니다. 먼저 복구를 완료해 주세요.")
         }
         guard errno == ENOENT else { throw failure("대화 보존 복구 기록의 상태를 확인하지 못했습니다.") }
-        for identity in [source.identity, target.identity] {
-            let url = bucket(identity)
-            for name in try names(url) where name.hasPrefix("local_") && name.hasSuffix(".json") {
-                var info = stat()
-                let path = url.appendingPathComponent(name)
-                guard lstat(path.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
-                      info.st_uid == geteuid(), info.st_nlink == 1, info.st_size >= 0 else {
-                    throw failure("대화 파일의 링크와 소유권을 확인하지 못해 CLI 계정만 전환할 수 없습니다.")
-                }
-            }
-        }
-        try directory(home.appendingPathComponent(".claude/projects", isDirectory: true), create: false)
-        // No record contents, source transcripts, process scan/quit or files are changed here.
+        // No Desktop records, transcripts, processes, or project directories are examined.
     }
     public func finish(_ preparation: ClaudeDesktopSessionPreparation, applied: Bool) async throws -> String? {
         guard case .prepared(let id, _) = preparation else { return nil }
@@ -313,6 +301,7 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
             object.removeValue(forKey: "alwaysAllowedReasons"); object.removeValue(forKey: "sessionPermissionUpdates")
             object.removeValue(forKey: "bypassChosenInApp"); object.removeValue(forKey: "autoChosenInApp")
             object.removeValue(forKey: "lastSpawnRootDetected")
+            for key in Self.resetMetadataKeys { object.removeValue(forKey: key) }
             if object["chromePermissionMode"] != nil { object["chromePermissionMode"] = "ask" }
             object.removeValue(forKey: "chromeAllowedDomains")
             entries.append(.init(filename: name, sourceData: data, targetData: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])))
@@ -326,7 +315,10 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         return (entries, ids, transcripts)
     }
     private static let detachedKeys: Set<String> = ["cloudSessionId", "outboundCCRRemoteId", "remoteControlSpawn", "remoteControlDescendant", "remoteControlAutoEligible", "remoteControlUserEnabled", "remoteControlLiveAtUpdateQuit", "remoteControlUserToggled", "remoteControlUserRequested", "remoteControlConnecting", "remoteControlAvailable", "remoteControlStarted", "startedViaRemoteControl", "remoteControlEnabled", "remoteControlAutoEnabled", "remoteControlAutoSource", "bridgeSessionId", "bridgeSessionUrl", "bridgeEpoch", "emailAddress", "envScopeId", "startedFromEnvironmentId"]
-    private static let normalKeys: Set<String> = ["sessionId", "cliSessionId", "cwd", "originCwd", "title", "titleSource", "createdAt", "lastActivityAt", "lastFocusedAt", "indexedAt", "isArchived", "isStarred", "model", "effort", "branch", "sourceBranch", "worktreePath", "worktreeName", "worktreeLazy", "gitAnchors", "gitAnchorsLookupOnly", "gitAnchorsFolderRealpath", "prs", "completedTurns", "permissionMode", "alwaysAllowedReasons", "sessionPermissionUpdates", "forkedFromSessionId", "forkedAtMessageUuid", "rewindEdges", "transcriptModelStates", "transcriptCuts", "contextWindow", "bridgeSessionIds", "cliBinaryPin", "importedFrom", "resumeConfirmed", "interruptedAwaitingPerson", "steeredByRemoteClient", "spawnSeed", "lastSpawnRootDetected", "bypassChosenInApp", "autoChosenInApp", "chromePermissionMode", "chromeAllowedDomains", "promptAppendSnapshot", "toolSurfaceSnapshot", "previousTitles", "lastAssistantUuid", "titleTurn", "titleCheck", "titleSuggestionsOff"]
+    private static let normalKeys: Set<String> = ["sessionId", "cliSessionId", "cwd", "originCwd", "title", "titleSource", "createdAt", "lastActivityAt", "lastFocusedAt", "indexedAt", "isArchived", "isStarred", "model", "effort", "branch", "sourceBranch", "worktreePath", "worktreeName", "worktreeLazy", "gitAnchors", "gitAnchorsLookupOnly", "gitAnchorsFolderRealpath", "prs", "completedTurns", "permissionMode", "alwaysAllowedReasons", "sessionPermissionUpdates", "forkedFromSessionId", "forkedAtMessageUuid", "rewindEdges", "transcriptModelStates", "transcriptCuts", "contextWindow", "bridgeSessionIds", "cliBinaryPin", "importedFrom", "resumeConfirmed", "interruptedAwaitingPerson", "steeredByRemoteClient", "spawnSeed", "lastSpawnRootDetected", "bypassChosenInApp", "autoChosenInApp", "chromePermissionMode", "chromeAllowedDomains", "promptAppendSnapshot", "toolSurfaceSnapshot", "previousTitles", "lastAssistantUuid", "titleTurn", "titleCheck", "titleSuggestionsOff", "classifierSummaryEnabled", "reportFindingsCard", "autoModeServerFallbackPrompt", "writtenBranches", "sessionSettings", "enabledMcpTools", "remoteMcpServersConfig", "error", "errorCategory", "errorAt", "errorRows", "priorErrorMark", "priorCliSessionIds", "latestUserFrameAt", "postTurnSummary", "postTurnSummaryFor", "turnWrapUp"]
+    // Recognized by the installed serializer, but scoped to the old account's tools or run.
+    // Accept their known shapes in source/existing targets without replaying them in a new target.
+    private static let resetMetadataKeys: Set<String> = ["sessionSettings", "enabledMcpTools", "remoteMcpServersConfig", "error", "errorCategory", "errorAt", "errorRows", "priorErrorMark", "priorCliSessionIds", "latestUserFrameAt", "postTurnSummary", "postTurnSummaryFor", "turnWrapUp"]
     private func record(_ data: Data, filename: String) throws -> [String: Any] {
         guard data.count <= 1_024 * 1_024 else { throw incompatible(.oversizedRecord) }
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw incompatible(.invalidRecordJSON) }
@@ -368,7 +360,8 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
         }
         if let bridge = object["bridgeSessionIds"], !(bridge is [String]) { throw incompatible(.unsupportedRecordMetadata) }
         for key in ["interruptedAwaitingPerson", "steeredByRemoteClient"] {
-            if let value = object[key], !(value is NSNull) { throw incompatible(.activeExecutionAssociation) }
+            if let value = object[key], !(value is NSNull),
+               !(isBoolean(value) && (value as? NSNumber)?.boolValue == false) { throw incompatible(.activeExecutionAssociation) }
         }
         if let value = object["resumeConfirmed"] {
             guard let confirmed = value as? NSNumber, CFGetTypeID(confirmed) == CFBooleanGetTypeID() else { throw incompatible(.unconfirmedImport) }
@@ -398,12 +391,17 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
             }
         }
         if let value = object["promptAppendSnapshot"] {
-            guard let snapshot = value as? [String: Any], Set(snapshot.keys) == ["append", "cliVersion", "settingsKey", "toolSets"],
+            guard let snapshot = value as? [String: Any],
+                  Set(snapshot.keys).isSubset(of: ["append", "cliVersion", "settingsKey", "toolSets"]),
                   let append = snapshot["append"] as? String, append.utf8.count <= 524_288,
                   snapshot["cliVersion"] is String || snapshot["cliVersion"] is NSNull,
-                  snapshot["settingsKey"] is String, let tools = snapshot["toolSets"] as? [String: Any],
-                  Set(tools.keys).isSubset(of: ["turnBox", "sideSessions"]), tools.values.allSatisfy(isBoolean) else {
+                  snapshot["settingsKey"] is String else {
                 throw incompatible(.unsupportedPromptSettings)
+            }
+            // jD reconstructs legacy defaults from append when toolSets is absent.
+            if let value = snapshot["toolSets"] {
+                guard let tools = value as? [String: Any], Set(tools.keys).isSubset(of: ["turnBox", "sideSessions"]),
+                      tools.values.allSatisfy(isBoolean) else { throw incompatible(.unsupportedPromptSettings) }
             }
         }
         if let value = object["toolSurfaceSnapshot"] {
@@ -422,7 +420,78 @@ public actor ClaudeDesktopSessionPreserver: ClaudeDesktopSessionPreserving {
                 throw incompatible(.unsupportedToolSettings)
             }
         }
+        try validateSessionMetadata(object)
         return object
+    }
+    private func validateSessionMetadata(_ object: [String: Any]) throws {
+        // Claude 2.37337.1: DPv6qSYD serializer/readers and BolytlRP session lifecycle.
+        for key in ["classifierSummaryEnabled", "reportFindingsCard", "autoModeServerFallbackPrompt"] {
+            if let value = object[key], !isBoolean(value) { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["writtenBranches"] {
+            guard let branches = value as? [String], branches.count <= 20 else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["sessionSettings"] {
+            guard let settings = value as? [String: Any], Set(settings.keys).isSubset(of: ["ultracode", "outputStyle"]),
+                  settings["ultracode"].map(isBoolean) ?? true,
+                  settings["outputStyle"].map({ $0 is String }) ?? true else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        for key in ["error", "errorCategory", "postTurnSummaryFor"] {
+            if let value = object[key], !(value is String) { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        for key in ["errorAt", "latestUserFrameAt"] {
+            if let value = object[key], !validTimestamp(value) { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["errorRows"] {
+            guard let rows = value as? [String: Any], Set(rows.keys) == ["at", "uuids"], validTimestamp(rows["at"]),
+                  let ids = rows["uuids"] as? [String], ids.count <= 8,
+                  ids.allSatisfy({ !$0.isEmpty && $0.utf16.count <= 128 }) else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["priorErrorMark"] {
+            let sources: Set<String> = ["query_error", "result", "timeout", "stream_ended_no_result", "send_swallowed", "crash_loop_parked", "reattach_ended", "admin_mcp_name_clash", "ssh_lost", "init_failed", "warm_failed"]
+            guard let mark = value as? [String: Any], Set(mark.keys).isSubset(of: ["source", "category", "at", "hadPendingTurn", "userMessageUuid"]),
+                  let source = mark["source"] as? String, sources.contains(source),
+                  validTimestamp(mark["at"]), (mark["at"] as? NSNumber)?.doubleValue ?? 0 > 0,
+                  mark["hadPendingTurn"].map(isBoolean) == true,
+                  mark["category"].map({ ($0 as? String)?.range(of: "^[a-z0-9_]{1,64}$", options: .regularExpression) != nil }) ?? true,
+                  mark["userMessageUuid"].map({ value in
+                      guard let id = value as? String else { return false }
+                      let uuid = id.hasPrefix("client-reattach-") ? String(id.dropFirst("client-reattach-".count)) : id
+                      return UUID(uuidString: uuid) != nil
+                  }) ?? true else {
+                throw incompatible(.unsupportedRecordMetadata)
+            }
+        }
+        if let value = object["priorCliSessionIds"] {
+            guard let ids = value as? [String], ids.count <= 200,
+                  ids.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["postTurnSummary"] {
+            let stringKeys: Set<String> = ["title", "description", "status_category", "status_detail", "recent_action", "needs_action", "summarizes_uuid"]
+            guard let summary = value as? [String: Any], Set(summary.keys).isSubset(of: stringKeys.union(["is_noteworthy"])),
+                  stringKeys.allSatisfy({ summary[$0].map { $0 is String } ?? true }),
+                  summary["is_noteworthy"].map(isBoolean) ?? true else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["turnWrapUp"] {
+            guard let wrap = value as? [String: Any], Set(wrap.keys).isSubset(of: ["description", "needsUser"]),
+                  wrap["description"] is String, wrap["needsUser"].map({ $0 is String }) ?? true else { throw incompatible(.unsupportedRecordMetadata) }
+        }
+        if let value = object["enabledMcpTools"] {
+            guard let tools = value as? [String: Any], tools.values.allSatisfy(isBoolean) else { throw incompatible(.unsupportedToolSettings) }
+        }
+        if let value = object["remoteMcpServersConfig"] {
+            guard let servers = value as? [[String: Any]], servers.allSatisfy({ server in
+                guard Set(server.keys).isSubset(of: ["uuid", "name", "url", "instructions", "tools"]),
+                      server["uuid"] is String, server["name"] is String,
+                      server["url"].map({ $0 is String }) ?? true,
+                      server["instructions"].map({ $0 is String }) ?? true,
+                      let tools = server["tools"] as? [[String: Any]] else { return false }
+                return tools.allSatisfy { tool in
+                    Set(tool.keys).isSubset(of: ["name", "description", "inputSchema", "annotations", "_meta"]) &&
+                    tool["name"] is String && (tool["description"].map { $0 is String } ?? true)
+                }
+            }) else { throw incompatible(.unsupportedToolSettings) }
+        }
     }
     private func isBoolean(_ value: Any) -> Bool {
         guard let number = value as? NSNumber else { return false }

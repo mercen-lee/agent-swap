@@ -133,7 +133,7 @@ struct SettingsView: View {
                         Text("확인 중…").foregroundStyle(.secondary)
                     }
                     if provider == .claude {
-                        Text("인증과 oauthAccount를 함께 교체하고, MCP·플러그인 인증과 계정 외 설정을 보존합니다. 실행 중인 Claude Code에는 반영이 지연될 수 있습니다.")
+                        Text("기본 전환은 CLI 인증과 계정 정보만 교체합니다. 계정 상세에서 Desktop 로그인을 저장하면 Desktop과 CLI를 함께 전환할 수 있습니다. MCP·플러그인 인증과 계정 외 설정, 대화 원본은 보존합니다.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("file·Keychain·auto 저장소를 지원합니다. 실행 중인 데스크톱·CLI·IDE·데몬이 종료됐는지 확인한 뒤 인증을 교체합니다. ephemeral·별도 secrets·알 수 없는 형식은 자동 변경하지 않습니다.")

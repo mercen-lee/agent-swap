@@ -33,6 +33,99 @@ public protocol ClaudeDesktopConversationProcessControlling: Sendable {
     func relaunch(at applicationURL: URL) async throws
 }
 
+/// Reconciles a prior Claude process generation with the current process inventory.
+/// A cached PID is only retained when its start time proves it is the same process;
+/// this keeps an orphaned helper visible across a retry without mistaking PID reuse
+/// for the prior Desktop generation.
+enum ClaudeDesktopProcessTracking {
+    static func hasExited(pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        let killResult = Darwin.kill(pid, 0)
+        let killError = errno
+        return hasExited(pid: pid, killResult: killResult, killErrno: killError, confirmedZombie: confirmedZombie(pid: pid))
+    }
+
+    static func hasExited(pid: Int32, killResult: Int32, killErrno: Int32, confirmedZombie: Bool) -> Bool {
+        guard pid > 0 else { return false }
+        return (killResult == -1 && killErrno == ESRCH) || confirmedZombie
+    }
+
+    static func confirmedZombie(pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let count = UInt32(mib.count)
+        var info = kinfo_proc()
+        var bytes = MemoryLayout<kinfo_proc>.size
+        let result = mib.withUnsafeMutableBufferPointer {
+            sysctl($0.baseAddress, count, &info, &bytes, nil, 0)
+        }
+        return confirmsZombie(info: info, result: result, returnedBytes: bytes)
+    }
+
+    static func confirmsZombie(info: kinfo_proc, result: Int32, returnedBytes: Int) -> Bool {
+        result == 0 && returnedBytes == MemoryLayout<kinfo_proc>.size && Int32(info.kp_proc.p_stat) == SZOMB
+    }
+
+    enum MissingInventoryLookup {
+        case live(ClaudeDesktopConversationProcessIdentity)
+        case absent
+        case unavailable
+    }
+
+    /// A zombie has exited and cannot retain or consume Desktop authentication.
+    /// Other status values remain conservatively live because their meaning is
+    /// process-state specific rather than proof of exit.
+    static func identity(for pid: Int32, info: proc_bsdinfo) -> ClaudeDesktopConversationProcessIdentity? {
+        guard info.pbi_status != UInt32(SZOMB) else { return nil }
+        return .init(pid: pid, startedAt: info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec)
+    }
+
+    static func reconcile(
+        previouslyRelated: inout [Int32: ClaudeDesktopConversationProcessIdentity],
+        currentIdentities: inout [Int32: ClaudeDesktopConversationProcessIdentity],
+        directRelated: Set<Int32>,
+        parents: [Int32: Int32],
+        missingInventory: [Int32: MissingInventoryLookup]
+    ) throws -> Set<Int32> {
+        var roots = directRelated
+        for (pid, cached) in Array(previouslyRelated) {
+            if let current = currentIdentities[pid] {
+                guard current == cached else {
+                    previouslyRelated.removeValue(forKey: pid)
+                    continue
+                }
+                roots.insert(pid)
+                continue
+            }
+            guard let lookup = missingInventory[pid] else {
+                throw AgentSwapError.storage("Claude Desktop 프로세스 상태를 확인하지 못했습니다.")
+            }
+            switch lookup {
+            case .live(let current) where current == cached:
+                currentIdentities[pid] = current
+                roots.insert(pid)
+            case .absent, .live:
+                previouslyRelated.removeValue(forKey: pid)
+            case .unavailable:
+                throw AgentSwapError.storage("Claude Desktop 프로세스 상태를 확인하지 못했습니다.")
+            }
+        }
+
+        var related = roots
+        var changed = true
+        while changed {
+            changed = false
+            for (pid, parent) in parents where related.contains(parent) {
+                if related.insert(pid).inserted { changed = true }
+            }
+        }
+        previouslyRelated = Dictionary(uniqueKeysWithValues: related.compactMap { pid in
+            currentIdentities[pid].map { (pid, $0) }
+        })
+        return related
+    }
+}
+
 public actor SystemClaudeDesktopConversationProcessController: ClaudeDesktopConversationProcessControlling {
     public static let bundleID = "com.anthropic.claudefordesktop"
     private var previouslyRelated: [Int32: ClaudeDesktopConversationProcessIdentity] = [:]
@@ -65,10 +158,11 @@ public actor SystemClaudeDesktopConversationProcessController: ClaudeDesktopConv
             let size = MemoryLayout<proc_bsdinfo>.size
             let result = withUnsafeMutablePointer(to: &info) { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, $0, Int32(size)) }
             if result != size {
-                if errno == ESRCH { continue }
+                if ClaudeDesktopProcessTracking.hasExited(pid: pid) { continue }
                 return .init(reliable: false)
             }
-            identities[pid] = .init(pid: pid, startedAt: info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec)
+            guard let identity = ClaudeDesktopProcessTracking.identity(for: pid, info: info) else { continue }
+            identities[pid] = identity
             parents[pid] = Int32(info.pbi_ppid)
             var bytes = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             let length = proc_pidpath(pid, &bytes, UInt32(bytes.count))
@@ -78,12 +172,32 @@ public actor SystemClaudeDesktopConversationProcessController: ClaudeDesktopConv
             }
         }
         guard desktopPIDs.allSatisfy({ identities[$0] != nil }) else { return .init(reliable: false) }
-        var relatedPIDs = desktopPIDs.union(bundled), changed = true
-        while changed {
-            changed = false
-            for (pid, parent) in parents where relatedPIDs.contains(parent) {
-                if relatedPIDs.insert(pid).inserted { changed = true }
+        var missingInventory: [Int32: ClaudeDesktopProcessTracking.MissingInventoryLookup] = [:]
+        for (pid, _) in previouslyRelated where identities[pid] == nil {
+            var info = proc_bsdinfo()
+            let size = MemoryLayout<proc_bsdinfo>.size
+            let result = withUnsafeMutablePointer(to: &info) { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, $0, Int32(size)) }
+            if result != size {
+                missingInventory[pid] = ClaudeDesktopProcessTracking.hasExited(pid: pid) ? .absent : .unavailable
+                continue
             }
+            if let current = ClaudeDesktopProcessTracking.identity(for: pid, info: info) {
+                missingInventory[pid] = .live(current)
+            } else {
+                missingInventory[pid] = .absent
+            }
+        }
+        var relatedPIDs: Set<Int32>
+        do {
+            relatedPIDs = try ClaudeDesktopProcessTracking.reconcile(
+                previouslyRelated: &previouslyRelated,
+                currentIdentities: &identities,
+                directRelated: desktopPIDs.union(bundled),
+                parents: parents,
+                missingInventory: missingInventory
+            )
+        } catch {
+            return .init(reliable: false)
         }
         var pendingParents = Array(relatedPIDs), checkedParents = Set<Int32>()
         while let parent = pendingParents.popLast() {
@@ -100,26 +214,18 @@ public actor SystemClaudeDesktopConversationProcessController: ClaudeDesktopConv
                     let size = MemoryLayout<proc_bsdinfo>.size
                     let result = withUnsafeMutablePointer(to: &info) { proc_pidinfo(child, PROC_PIDTBSDINFO, 0, $0, Int32(size)) }
                     if result != size {
-                        if errno == ESRCH { continue }
+                        if ClaudeDesktopProcessTracking.hasExited(pid: child) { continue }
                         return .init(reliable: false)
                     }
-                    identities[child] = .init(pid: child, startedAt: info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec)
+                    guard let identity = ClaudeDesktopProcessTracking.identity(for: child, info: info) else { continue }
+                    identities[child] = identity
                 }
                 relatedPIDs.insert(child); pendingParents.append(child)
             }
         }
-        for (pid, identity) in previouslyRelated where identities[pid] == nil {
-            var info = proc_bsdinfo()
-            let size = MemoryLayout<proc_bsdinfo>.size
-            let result = withUnsafeMutablePointer(to: &info) { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, $0, Int32(size)) }
-            if result != size {
-                if errno == ESRCH { continue }
-                return .init(reliable: false)
-            }
-            let current = ClaudeDesktopConversationProcessIdentity(pid: pid, startedAt: info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec)
-            if current == identity { identities[pid] = current }
-        }
-        for pid in relatedPIDs { previouslyRelated[pid] = identities[pid] }
+        previouslyRelated = Dictionary(uniqueKeysWithValues: relatedPIDs.compactMap { pid in
+            identities[pid].map { (pid, $0) }
+        })
         return .init(desktop: Set(desktopPIDs.compactMap { identities[$0] }), related: Set(relatedPIDs.compactMap { identities[$0] }), live: Set(identities.values))
     }
     public func requestNormalTermination() async -> Bool {

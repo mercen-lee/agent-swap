@@ -19,7 +19,7 @@ open build/AgentSwap.app --args --demo
 
 `AGENTSWAP_TEST_SCRATCH_PATH`는 Core 빌드 캐시 위치입니다. 기본값은 `build/CoreTests`이며 동시에 여러 테스트를 실행하면 서로 다른 경로를 지정합니다. GitHub Actions는 macOS에서 Core 테스트와 Release 앱 빌드·서명 검증을 수행합니다. CI에는 실계정 로그인을 연결하지 않습니다.
 
-빌드 스크립트는 기본적으로 ad-hoc 서명합니다. Developer ID는 `AGENTSWAP_SIGN_IDENTITY`로 선택할 수 있습니다. 실행 중인 앱은 덮어쓰지 않으므로 새 산출물의 경로를 확인하고 앱을 정상 종료한 뒤 다시 설치하세요. 서명 키·인증서와 공증 자격 증명은 저장소에 넣지 않습니다.
+빌드 스크립트는 기본적으로 ad-hoc 서명합니다. 최종 앱의 서명 identity는 `AGENTSWAP_SIGN_IDENTITY`로 선택할 수 있습니다. 개발 Mac에서 같은 서명으로 반복 빌드하려면 공개 인증서 SHA-1만 담은 한 줄짜리 `.agentswap-signing-identity`를 저장소 루트에 두면 됩니다. 환경 변수가 있으면 그 값을 우선하며 `AGENTSWAP_SIGN_IDENTITY=-`는 ad-hoc 서명을 명시합니다. Xcode 빌드는 provisioning 설정에 의존하지 않도록 ad-hoc으로 만든 뒤 선택한 identity로 최종 앱을 다시 서명합니다. 이 파일은 Git에서 제외합니다. 실행 중인 앱은 덮어쓰지 않으므로 새 산출물의 경로를 확인하고 앱을 정상 종료한 뒤 다시 설치하세요. 서명 키·인증서와 공증 자격 증명은 저장소에 넣지 않습니다.
 
 ## 변경 검증
 

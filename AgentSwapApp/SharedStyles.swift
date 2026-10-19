@@ -74,8 +74,8 @@ struct AccountSwitchPresentation {
     let blockReason: BlockReason?
 
     init(account: AccountRecord, isActive: Bool, isPending: Bool, compatibility: CompatibilityStatus?, isBusy: Bool, operationBlockReason: String?) {
-        requiresRelaunch = isPending
-        title = isPending ? (account.provider == .codex ? "전환 및 재실행" : "세션 보존 및 재실행") : (isActive ? "현재 계정" : "계정 전환")
+        requiresRelaunch = isPending && account.provider == .codex
+        title = isPending ? (account.provider == .codex ? "전환 및 재실행" : "다시 전환") : (isActive ? "현재 계정" : "계정 전환")
         if isActive && !isPending {
             blockReason = .currentAccount
         } else if let operationBlockReason {
@@ -101,47 +101,8 @@ struct AccountSwitchPresentation {
     }
 }
 
-struct ClaudeCLIOnlySwitchAction: View {
-    let model: AppModel
-    var compact = false
-    @State private var confirmingAccount: AccountRecord?
-
-    var body: some View {
-        Group {
-            if let id = model.claudeCLIOnlySwitchTarget,
-               let account = model.state.accounts.first(where: { $0.id == id && $0.provider == .claude }) {
-                VStack(alignment: .leading, spacing: 6) {
-                    if !compact {
-                        Text("기존 대화 파일을 그대로 두고 \(account.displayName)의 CLI 계정만 전환할 수 있습니다.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    HStack {
-                        Button("CLI 계정만 전환", systemImage: "arrow.left.arrow.right") {
-                            confirmingAccount = account
-                        }
-                        .disabled(model.switchOperationBlockReason != nil)
-                        .help(model.switchOperationBlockReason ?? "대화 목록 자동 보존 없이 Claude Code CLI 인증만 전환합니다.")
-                        Button("닫기") { model.dismissClaudeCLIOnlySwitch() }
-                            .disabled(model.isBusy)
-                    }
-                    .controlSize(.small)
-                    .lineLimit(1)
-                }
-            }
-        }
-        .confirmationDialog("CLI 계정만 전환할까요?", item: $confirmingAccount, titleVisibility: .visible) { account in
-            Button("CLI 계정 전환") {
-                Task { await model.switchClaudeCLIOnly(account.id) }
-            }
-            Button("취소", role: .cancel) { model.dismissClaudeCLIOnlySwitch() }
-        } message: { account in
-            Text("\(account.displayName)의 Claude Code CLI 인증을 적용합니다. 기존 대화 파일은 변경하지 않으며, 다른 계정의 데스크톱 대화 목록에 자동으로 추가하지 않습니다. Claude 데스크톱 로그인은 별도로 유지됩니다.")
-        }
-        .onChange(of: model.claudeCLIOnlySwitchTarget) {
-            if model.claudeCLIOnlySwitchTarget != confirmingAccount?.id { confirmingAccount = nil }
-        }
-    }
+enum ClaudeConversationHelp {
+    static let url = URL(string: "https://code.claude.com/docs/en/desktop#coming-from-the-cli")!
 }
 
 struct UsageProgress: View {

@@ -52,7 +52,7 @@ final class ProviderDirectoryLock {
     }
 }
 
-struct AuthMutation: Codable, Sendable {
+struct AuthMutation: Codable, Sendable, Equatable {
     enum Location: Codable, Sendable, Equatable { case file(String), keychain(service: String, account: String) }
     var location: Location
     var before: Data?
@@ -97,6 +97,71 @@ struct AuthTransaction {
     func hasPendingRecovery() throws -> Bool {
         try keychain.read(service: Self.service, account: identifier) != nil
     }
+    /// Reads only the private recovery journal, never a provider location.
+    func recoveryJournalData() throws -> Data? {
+        try keychain.read(service: Self.service, account: identifier)
+    }
+    /// Returns an uncommitted journal only when it is one exact expected native-auth transaction.
+    /// Any other journal remains fail-closed for callers that preserve a later native generation.
+    func uncommittedNativeJournalSnapshot(allowedLocations: Set<AuthMutation.Location>,
+                                          expectedMutations: [[AuthMutation]]) throws -> Data? {
+        guard let data = try recoveryJournalData() else { return nil }
+        try validateUncommittedNativeJournal(data, allowedLocations: allowedLocations,
+                                             expectedMutations: expectedMutations)
+        return data
+    }
+    func validateUncommittedNativeJournal(_ data: Data, allowedLocations: Set<AuthMutation.Location>,
+                                          expectedMutations: [[AuthMutation]]) throws {
+        let journal = try validatedJournal(data, allowedLocations: allowedLocations)
+        guard !journal.committed, expectedMutations.contains(journal.mutations) else {
+            throw AgentSwapError.storage("현재 로그인을 보존할 수 없는 미완료 인증 복원 기록입니다.")
+        }
+    }
+    func deleteUncommittedNativeJournal(_ data: Data, allowedLocations: Set<AuthMutation.Location>,
+                                        expectedMutations: [[AuthMutation]]) throws {
+        try validateUncommittedNativeJournal(data, allowedLocations: allowedLocations,
+                                             expectedMutations: expectedMutations)
+        guard try recoveryJournalData() == data else {
+            throw AgentSwapError.storage("인증 복원 기록이 확인 중 변경되어 정리를 중단했습니다.")
+        }
+        try keychain.delete(service: Self.service, account: identifier)
+        guard try recoveryJournalData() == nil else {
+            throw AgentSwapError.storage("미완료 인증 복원 기록 삭제 결과를 확인하지 못했습니다.")
+        }
+    }
+    /// Clears only a durably committed private journal. This never reads or writes any provider
+    /// location, so a later native token rotation cannot turn committed housekeeping into a
+    /// rollback attempt.
+    func discardCommittedRecovery(allowedLocations: Set<AuthMutation.Location>) throws {
+        guard let data = try keychain.read(service: Self.service, account: identifier) else { return }
+        let journal = try validatedJournal(data, allowedLocations: allowedLocations)
+        guard journal.committed else {
+            throw AgentSwapError.storage("완료되지 않은 인증 복원 기록이 있어 정리할 수 없습니다.")
+        }
+        guard try keychain.read(service: Self.service, account: identifier) == data else {
+            throw AgentSwapError.storage("인증 복원 기록이 확인 중 변경되어 정리를 중단했습니다.")
+        }
+        try keychain.delete(service: Self.service, account: identifier)
+        guard try keychain.read(service: Self.service, account: identifier) == nil else {
+            throw AgentSwapError.storage("완료된 인증 복원 기록 삭제 결과를 확인하지 못했습니다.")
+        }
+    }
+    /// Performs the same committed-only cleanup, but leaves a valid uncommitted journal intact
+    /// so a caller may validate and archive that exact journal without touching provider state.
+    @discardableResult
+    func discardCommittedRecoveryIfPresent(allowedLocations: Set<AuthMutation.Location>) throws -> Bool {
+        guard let data = try recoveryJournalData() else { return false }
+        let journal = try validatedJournal(data, allowedLocations: allowedLocations)
+        guard journal.committed else { return false }
+        guard try recoveryJournalData() == data else {
+            throw AgentSwapError.storage("인증 복원 기록이 확인 중 변경되어 정리를 중단했습니다.")
+        }
+        try keychain.delete(service: Self.service, account: identifier)
+        guard try recoveryJournalData() == nil else {
+            throw AgentSwapError.storage("완료된 인증 복원 기록 삭제 결과를 확인하지 못했습니다.")
+        }
+        return true
+    }
     func recover(allowedLocations: Set<AuthMutation.Location>) throws {
         // Once a native write has started, cancellation must not stop its durable rollback.
         // The native subprocess still retains its permission and elapsed-time bounds.
@@ -106,14 +171,7 @@ struct AuthTransaction {
     }
     private func recoverIgnoringCancellation(allowedLocations: Set<AuthMutation.Location>) throws {
         guard let data = try keychain.read(service: Self.service, account: identifier) else { return }
-        let journal: AuthJournal
-        do { journal = try JSONDecoder().decode(AuthJournal.self, from: data) }
-        catch { throw AgentSwapError.storage("복원 기록의 형식을 읽지 못했습니다. 인증을 변경하지 않았습니다.") }
-        guard journal.version == 1, !journal.mutations.isEmpty,
-              Set(journal.mutations.map(\.location)).count == journal.mutations.count,
-              journal.mutations.allSatisfy({ allowedLocations.contains($0.location) }) else {
-            throw AgentSwapError.unsupported("지원하지 않는 인증 복원 기록입니다.")
-        }
+        let journal = try validatedJournal(data, allowedLocations: allowedLocations)
         // The durable commit records successful verification of every location. Later CLI
         // rotation or an external account change cannot turn it back into a rollback obligation.
         // Clean only our private journal; do not read, validate, or modify current provider state.
@@ -136,7 +194,19 @@ struct AuthTransaction {
         }
         try keychain.delete(service: Self.service, account: identifier)
     }
-    func perform(_ mutations: [AuthMutation], checkCancellation: () throws -> Void = {}, verifyLock: () throws -> Void) throws {
+    private func validatedJournal(_ data: Data, allowedLocations: Set<AuthMutation.Location>) throws -> AuthJournal {
+        let journal: AuthJournal
+        do { journal = try JSONDecoder().decode(AuthJournal.self, from: data) }
+        catch { throw AgentSwapError.storage("복원 기록의 형식을 읽지 못했습니다. 인증을 변경하지 않았습니다.") }
+        guard journal.version == 1, !journal.mutations.isEmpty,
+              Set(journal.mutations.map(\.location)).count == journal.mutations.count,
+              journal.mutations.allSatisfy({ allowedLocations.contains($0.location) }) else {
+            throw AgentSwapError.unsupported("지원하지 않는 인증 복원 기록입니다.")
+        }
+        return journal
+    }
+    func perform(_ mutations: [AuthMutation], checkCancellation: () throws -> Void = {},
+                 verifyCompletion: () throws -> Void = {}, verifyLock: () throws -> Void) throws {
         guard !mutations.isEmpty else { return }
         guard !(try hasPendingRecovery()) else { throw AgentSwapError.storage("이전 전환의 복원 처리가 필요합니다.") }
         // Check targets AND rollback images before the journal or any provider write.
@@ -158,6 +228,7 @@ struct AuthTransaction {
             }
             try checkCancellation()
             try verifyLock()
+            try verifyCompletion()
             journal.committed = true
             try keychain.write(JSONEncoder().encode(journal), service: Self.service, account: identifier)
         } catch {

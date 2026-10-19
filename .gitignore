@@ -44,5 +44,6 @@ xcuserdata/
 /auth.json
 /state.json
 /instance.lock
+/.agentswap-signing-identity
 /Library/Application Support/AgentSwap/
 /Library/Application Support/Claude/

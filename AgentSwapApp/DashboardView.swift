@@ -28,6 +28,7 @@ struct DashboardView: View {
     @State private var editingAccount: AccountRecord?
     @State private var deletingAccount: AccountRecord?
     @State private var statusDetails: StatusMessage?
+    @State private var keepingCurrentRecoveryAccount: AccountRecord?
 
     private var filteredAccounts: [AccountRecord] {
         model.state.accounts.filter { account in
@@ -105,14 +106,22 @@ struct DashboardView: View {
         } message: {
             Text("\(deletingAccount?.displayName ?? "계정")의 저장된 인증과 사용량 캐시를 삭제합니다. 제공자의 구독은 유지됩니다.")
         }
+        .alert("현재 Claude 로그인을 유지하고 복구할까요?", isPresented: Binding(
+            get: { keepingCurrentRecoveryAccount != nil },
+            set: { if !$0 { keepingCurrentRecoveryAccount = nil } }
+        )) {
+            Button("취소", role: .cancel) { keepingCurrentRecoveryAccount = nil }
+            Button("현재 로그인으로 복구") {
+                guard let account = keepingCurrentRecoveryAccount else { return }
+                Task { await model.recoverClaudeKeepingCurrentLogin(account.id) }
+                keepingCurrentRecoveryAccount = nil
+            }
+        } message: {
+            Text("현재 CLI 로그인을 유지합니다. 보류된 갱신 인증은 Keychain에 별도로 보관하고, 현재 계정을 확인한 뒤 조회를 다시 시작합니다.")
+        }
         .onChange(of: filteredAccounts.map(\.id), initial: true) {
             if !filteredAccounts.contains(where: { $0.id == selectedID }) {
                 selectedID = filteredAccounts.first?.id
-            }
-        }
-        .onChange(of: selectedID) {
-            if let offered = model.claudeCLIOnlySwitchTarget, selectedID != offered {
-                model.dismissClaudeCLIOnlySwitch()
             }
         }
     }
@@ -276,7 +285,6 @@ struct DashboardView: View {
                     .frame(width: 440, height: 240)
                 }
             } else { Spacer(minLength: 0) }
-            ClaudeCLIOnlySwitchAction(model: model, compact: true)
         }
         .font(.caption)
         .controlSize(.small)
@@ -295,6 +303,8 @@ struct DashboardView: View {
                 cache: model.state.usage[account.id],
                 isActive: model.state.activeAccounts[account.provider] == account.id,
                 isPending: model.pendingSwitch[account.provider] == account.id,
+                needsSessionRecovery: model.claudeSessionRecoveryRequired,
+                needsDesktopRecovery: model.claudeDesktopRecoveryRequired,
                 compatibility: model.compatibility[account.provider],
                 isBusy: model.isBusy,
                 switchOperationBlockReason: model.switchOperationBlockReason,
@@ -303,6 +313,11 @@ struct DashboardView: View {
                 onDelete: { deletingAccount = account },
                 onEligibility: { value in Task { await model.updateAccount(account.id, nickname: nil, automaticSwitchEligible: value) } },
                 onRecover: { Task { await model.recoverInterruptedSwitch(account.provider) } },
+                onRecoverKeepingCurrent: { keepingCurrentRecoveryAccount = account },
+                onRecoverSessions: { Task { await model.recoverInterruptedClaudeSessions() } },
+                onCaptureDesktop: { Task { await model.captureClaudeDesktopLogin(account.id) } },
+                onSwitchDesktop: { Task { await model.switchClaudeDesktopAccount(account.id) } },
+                onRecoverDesktop: { Task { await model.recoverClaudeDesktopSwitch() } },
                 onRecheckCompatibility: { Task { await model.recheckCompatibility(account.provider) } },
                 onAuthorizeSavedCredential: { Task { await model.authorizeSavedCredential(account.id) } }
             )

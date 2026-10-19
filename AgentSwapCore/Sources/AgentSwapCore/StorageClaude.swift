@@ -9,6 +9,40 @@ private struct PendingClaudeRotation: Codable, Sendable {
     var accountID: UUID
 }
 
+/// The archive is deliberately content-addressed by the original marker.  It never becomes a
+/// rollback instruction: it records the live third generation which the explicit recovery kept.
+private struct PreservedClaudeRotationArchive: Codable, Sendable {
+    let version: Int
+    let originalRotationMarker: Data
+    let originalTransactionJournal: Data?
+    let vaultBefore: Data?
+    let currentVaultData: Data
+    let nativeKeychainDigest: String?
+    let nativeFileDigest: String?
+    let configDigest: String?
+
+    init(originalRotationMarker: Data, originalTransactionJournal: Data?, vaultBefore: Data?, currentVaultData: Data,
+         nativeKeychainDigest: String?, nativeFileDigest: String?, configDigest: String?) {
+        version = 1
+        self.originalRotationMarker = originalRotationMarker
+        self.originalTransactionJournal = originalTransactionJournal
+        self.vaultBefore = vaultBefore
+        self.currentVaultData = currentVaultData
+        self.nativeKeychainDigest = nativeKeychainDigest
+        self.nativeFileDigest = nativeFileDigest
+        self.configDigest = configDigest
+    }
+}
+
+private struct PreservedClaudeRecoveryIndex: Codable, Sendable {
+    let version: Int
+    let markerHashes: [String]
+    init(markerHashes: [String]) {
+        version = 1
+        self.markerHashes = markerHashes
+    }
+}
+
 /// A validated response remains owned by the actor until its first exact durable copy exists.
 /// Encoded bytes are retained too: a failed readback must retry the same marker, not a newly
 /// encoded representation whose object-key order may differ.
@@ -40,7 +74,32 @@ public actor ClaudeAuthStore {
     private var allowedLocations: Set<AuthMutation.Location> {
         [authLocation, .file(authURL.path), .file(configURL.path)]
     }
+    private var nativeAuthLocations: Set<AuthMutation.Location> {
+        [authLocation, .file(authURL.path)]
+    }
     private var rotationKey: String { transaction.identifier + "|rotation" }
+    private func preservedRotationIndexKey(accountID: UUID) -> String {
+        transaction.identifier + "|preserved-index|" + accountID.uuidString
+    }
+    private func preservedRotationHash(_ marker: Data) -> String { Self.authDigest(marker) }
+    private func preservedRotationKey(_ marker: Data) -> String {
+        rotationKey + "|preserved|" + preservedRotationHash(marker)
+    }
+    private func sortedArchiveData(_ archive: PreservedClaudeRotationArchive) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(archive)
+    }
+    private func sortedCredentialData(_ credential: Credential) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(credential)
+    }
+    private func sortedIndexData(_ index: PreservedClaudeRecoveryIndex) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(index)
+    }
     private func pendingRecovery() throws -> Bool {
         try retainedCredentials.values.contains { $0.rotationData != nil }
             || transaction.hasPendingRecovery() || keychain.read(service: AuthTransaction.service, account: rotationKey) != nil
@@ -95,6 +154,9 @@ public actor ClaudeAuthStore {
     }
     private nonisolated static func authDigest(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    private nonisolated static func optionalDigest(_ data: Data?) -> String? {
+        data.map(authDigest)
     }
     private static let sharedKeys: Set<String> = ["mcpOAuth", "mcpOAuthClientConfig", "mcpXaaIdp", "mcpXaaIdpConfig", "pluginSecrets"]
     private static let knownKeys = sharedKeys.union(["claudeAiOauth", "trustedDeviceToken", "organizationUuid"])
@@ -218,9 +280,15 @@ public actor ClaudeAuthStore {
         try locks.forEach { try $0.verify() }
         let pendingRotation: PendingClaudeRotation?
         if let data = try keychain.read(service: AuthTransaction.service, account: rotationKey) {
+            if try keychain.read(service: AuthTransaction.service, account: preservedRotationKey(data)) != nil {
+                throw AgentSwapError.storage("현재 로그인을 유지하는 Claude 복구를 다시 시도하세요.")
+            }
             let pending: PendingClaudeRotation
             do { pending = try JSONDecoder().decode(PendingClaudeRotation.self, from: data) }
             catch { throw AgentSwapError.storage("토큰 갱신 복원 자료를 읽지 못했습니다.") }
+            if try hasPreservedIntent(marker: data, accountID: pending.accountID) {
+                throw AgentSwapError.storage("현재 로그인을 유지하는 Claude 복구를 다시 시도하세요.")
+            }
             // Refuse malformed or conflicting metadata before even a native transaction rollback.
             _ = try validateRotationSource(pending)
             pendingRotation = pending
@@ -233,6 +301,311 @@ public actor ClaudeAuthStore {
             try persistNativeRotation(rotated, expectedRaw: live, nativeAfter: pending.nativeAfter, locks: locks)
             try keychain.delete(service: AuthTransaction.service, account: rotationKey)
         }
+    }
+    /// Explicitly resolves the one supported third-generation case: Claude has already rotated
+    /// the native login beyond both the interrupted predecessor and successor.  It records that
+    /// live login and only removes the marker after the verified current credential is durable.
+    func recoverKeepingCurrentLogin(account: AccountRecord,
+                                    verify: @Sendable (Credential) async throws -> ImportedAccount) async throws -> ImportedAccount {
+        guard KeychainInteraction.mode == .interactive else {
+            throw AgentSwapError.storage("현재 로그인을 유지하는 Claude 복구는 사용자 작업에서만 실행할 수 있습니다.")
+        }
+        guard account.provider == .claude else { throw AgentSwapError.authentication("Claude 계정만 복구할 수 있습니다.") }
+        guard !refreshing else { throw AgentSwapError.storage("Claude 토큰 갱신이 진행 중입니다.") }
+        try persistRetainedCredentials()
+        guard retainedCredentials.isEmpty else { throw AgentSwapError.storage("보존한 Claude 인증을 먼저 저장해야 합니다.") }
+        refreshing = true
+        defer { refreshing = false }
+
+        var locks = try locks()
+        defer { withExtendedLifetime(locks) {} }
+        try locks.forEach { try $0.verify() }
+        _ = try transaction.discardCommittedRecoveryIfPresent(allowedLocations: allowedLocations)
+        guard let marker = try keychain.read(service: AuthTransaction.service, account: rotationKey) else {
+            throw AgentSwapError.storage("보존할 Claude 토큰 갱신 복원 자료가 없습니다.")
+        }
+        let pending: PendingClaudeRotation
+        do { pending = try JSONDecoder().decode(PendingClaudeRotation.self, from: marker) }
+        catch { throw AgentSwapError.storage("토큰 갱신 복원 자료를 읽지 못했습니다.") }
+        guard pending.accountID == account.id else {
+            throw AgentSwapError.storage("다른 Claude 계정의 토큰 갱신 복원 자료가 있어 복구를 중단했습니다.")
+        }
+        guard pending.expectedRaw != nil,
+              try plannedNativeRotation(pending.credential, sourceRaw: pending.expectedRaw) == pending.nativeAfter else {
+            throw AgentSwapError.unsupported("토큰 갱신 복원 자료의 네이티브 인증 이미지가 일치하지 않습니다.")
+        }
+        guard try ProviderAccountParser.claude(pending.credential).account.identity == account.identity else {
+            throw AgentSwapError.authentication("토큰 갱신 복원 자료의 Claude 계정이 선택한 계정과 다릅니다.")
+        }
+        let originalJournal = try transaction.uncommittedNativeJournalSnapshot(
+            allowedLocations: nativeAuthLocations,
+            expectedMutations: nativeRotationJournalMutations(expectedRaw: try requiredExpectedRaw(pending), nativeAfter: pending.nativeAfter))
+
+        let beforeKeychain = try keychain.read(service: keychainService, account: keychainAccount)
+        let beforeFile = try files.read(authURL)
+        guard beforeKeychain == nil || beforeFile == nil || beforeKeychain == beforeFile else {
+            throw AgentSwapError.storage("Claude Keychain과 파일 인증이 달라 현재 로그인을 보존할 수 없습니다.")
+        }
+        guard let liveRaw = beforeKeychain ?? beforeFile else {
+            throw AgentSwapError.storage("현재 Claude 로그인이 없어 복구를 중단했습니다.")
+        }
+        guard liveRaw != pending.expectedRaw, liveRaw != pending.nativeAfter else {
+            throw AgentSwapError.storage("현재 Claude 인증은 중단된 갱신 세대입니다. 기존 토큰 갱신 복구를 사용하세요.")
+        }
+        let configSnapshot = try files.read(configURL)
+        let liveConfig = try config()
+        let liveAuth = try validate(liveRaw)
+        let cached = liveConfig["oauthAccount"] as? [String: Any]
+        try validateSourceOrganization(liveAuth, cachedAccount: cached)
+        let metadata = try cached.map(authData)
+        let identity = try cachedIdentityStatus(expectedMetadata: pending.credential.accountMetadata, cachedMetadata: metadata)
+        guard identity.complete, identity.matches else {
+            throw AgentSwapError.storage("현재 Claude 로그인 계정 식별 정보를 완전히 확인하지 못했습니다.")
+        }
+        let liveCredential = try CredentialParser.claude(rawAuth: liveRaw, accountMetadata: metadata)
+        guard try ProviderAccountParser.claude(liveCredential).account.identity == account.identity else {
+            throw AgentSwapError.authentication("현재 Claude 로그인 계정이 선택한 계정과 다릅니다.")
+        }
+        let vaultBefore = try keychain.read(service: KeychainSecretStore.service, account: account.id.uuidString)
+        try validateRecoveryVault(vaultBefore, pending: pending, liveRaw: liveRaw, account: account)
+
+        let preservedKey = preservedRotationKey(marker)
+        let markerHash = preservedRotationHash(marker)
+        let indexKey = preservedRotationIndexKey(accountID: account.id)
+        let existingArchive = try keychain.read(service: AuthTransaction.service, account: preservedKey)
+        let archive: PreservedClaudeRotationArchive
+        let activeJournal: Data?
+        if let existingArchive {
+            do { archive = try JSONDecoder().decode(PreservedClaudeRotationArchive.self, from: existingArchive) }
+            catch { throw AgentSwapError.storage("현재 로그인 보존 복구 기록을 읽지 못했습니다.") }
+            guard archive.version == 1, archive.originalRotationMarker == marker,
+                  archive.nativeKeychainDigest == Self.optionalDigest(beforeKeychain),
+                  archive.nativeFileDigest == Self.optionalDigest(beforeFile),
+                  archive.configDigest == Self.optionalDigest(configSnapshot) else {
+                throw AgentSwapError.storage("현재 Claude 로그인 또는 보존 복구 기록이 외부에서 변경되었습니다.")
+            }
+            guard vaultBefore == archive.vaultBefore || vaultBefore == archive.currentVaultData else {
+                throw AgentSwapError.storage("Claude 계정 보관함 인증이 외부에서 변경되어 복구를 중단했습니다.")
+            }
+            _ = try recoveryVaultCredential(archive.currentVaultData, account: account)
+            if let archivedJournal = archive.originalTransactionJournal {
+                try transaction.validateUncommittedNativeJournal(archivedJournal, allowedLocations: nativeAuthLocations,
+                                                                 expectedMutations: nativeRotationJournalMutations(expectedRaw: try requiredExpectedRaw(pending), nativeAfter: pending.nativeAfter))
+                guard originalJournal == archivedJournal || originalJournal == nil else {
+                    throw AgentSwapError.storage("Claude 인증 복원 기록이 보존 복구 이후 변경되었습니다.")
+                }
+            } else {
+                guard originalJournal == nil else {
+                    throw AgentSwapError.storage("새 Claude 인증 복원 기록이 있어 현재 로그인을 보존할 수 없습니다.")
+                }
+            }
+            activeJournal = originalJournal
+        } else {
+            // This payload is only written after the profile proof below.  Its stable marker hash
+            // permits a failed marker deletion to resume without creating another archive slot.
+            archive = PreservedClaudeRotationArchive(originalRotationMarker: marker, originalTransactionJournal: originalJournal, vaultBefore: vaultBefore,
+                                                      currentVaultData: Data(), nativeKeychainDigest: Self.optionalDigest(beforeKeychain),
+                                                      nativeFileDigest: Self.optionalDigest(beforeFile), configDigest: Self.optionalDigest(configSnapshot))
+            activeJournal = originalJournal
+        }
+
+        // Do not hold Claude's provider locks while the profile request is in flight. The exact
+        // snapshots below fence every source again after reacquiring fresh locks.
+        locks.removeAll()
+        try Task.checkCancellation()
+        let verified = try await verify(liveCredential)
+        guard verified.account.identity == account.identity,
+              try ProviderAccountParser.claude(verified.credential).account.identity == account.identity,
+              verified.credential.rawAuth == liveCredential.rawAuth,
+              verified.credential.accessToken == liveCredential.accessToken,
+              verified.credential.refreshToken == liveCredential.refreshToken else {
+            throw AgentSwapError.authentication("현재 Claude 로그인 확인 결과가 인증 세대와 일치하지 않습니다.")
+        }
+        let currentVaultData: Data
+        let committedArchive: PreservedClaudeRotationArchive
+        if existingArchive != nil {
+            let archived = try recoveryVaultCredential(archive.currentVaultData, account: account)
+            guard archived.rawAuth == verified.credential.rawAuth,
+                  archived.accessToken == verified.credential.accessToken,
+                  archived.refreshToken == verified.credential.refreshToken else {
+                throw AgentSwapError.storage("현재 Claude 로그인 확인 결과가 보존 복구 기록과 다릅니다.")
+            }
+            currentVaultData = archive.currentVaultData
+            committedArchive = archive
+        } else {
+            currentVaultData = try sortedCredentialData(verified.credential)
+            committedArchive = PreservedClaudeRotationArchive(originalRotationMarker: marker, originalTransactionJournal: activeJournal, vaultBefore: vaultBefore,
+                                                               currentVaultData: currentVaultData,
+                                                               nativeKeychainDigest: Self.optionalDigest(beforeKeychain),
+                                                               nativeFileDigest: Self.optionalDigest(beforeFile),
+                                                               configDigest: Self.optionalDigest(configSnapshot))
+        }
+        try Task.checkCancellation()
+        locks = try self.locks()
+        try locks.forEach { try $0.verify() }
+        guard try transaction.recoveryJournalData() == activeJournal,
+              try keychain.read(service: AuthTransaction.service, account: rotationKey) == marker,
+              try keychain.read(service: keychainService, account: keychainAccount) == beforeKeychain,
+              try files.read(authURL) == beforeFile, try files.read(configURL) == configSnapshot,
+              try keychain.read(service: KeychainSecretStore.service, account: account.id.uuidString) == vaultBefore else {
+            throw AgentSwapError.storage("현재 Claude 로그인 또는 복구 자료가 확인 중 변경되었습니다.")
+        }
+
+        // From here onward this is a synchronous, durable commit. Do not observe cancellation:
+        // the marker remains until both the archive and current vault generation are confirmed.
+        let archiveData = try sortedArchiveData(committedArchive)
+        try registerPreservedArchive(markerHash, indexKey: indexKey)
+        if let existingArchive {
+            guard existingArchive == archiveData else {
+                throw AgentSwapError.storage("현재 로그인 보존 복구 기록이 예상과 다릅니다.")
+            }
+        } else {
+            try keychain.write(archiveData, service: AuthTransaction.service, account: preservedKey)
+        }
+        guard try keychain.read(service: AuthTransaction.service, account: preservedKey) == archiveData else {
+            throw AgentSwapError.storage("현재 로그인 보존 복구 기록의 저장 결과를 확인하지 못했습니다.")
+        }
+        try locks.forEach { try $0.verify() }
+        guard try keychain.read(service: AuthTransaction.service, account: rotationKey) == marker,
+              try keychain.read(service: keychainService, account: keychainAccount) == beforeKeychain,
+              try files.read(authURL) == beforeFile, try files.read(configURL) == configSnapshot,
+              try keychain.read(service: KeychainSecretStore.service, account: account.id.uuidString) == vaultBefore,
+              try transaction.recoveryJournalData() == activeJournal else {
+            throw AgentSwapError.storage("현재 Claude 로그인 또는 복구 자료가 저장 중 변경되었습니다.")
+        }
+        try keychain.write(currentVaultData, service: KeychainSecretStore.service, account: account.id.uuidString)
+        guard try keychain.read(service: KeychainSecretStore.service, account: account.id.uuidString) == currentVaultData else {
+            throw AgentSwapError.storage("현재 Claude 인증 보관함 저장 결과를 확인하지 못했습니다.")
+        }
+        try locks.forEach { try $0.verify() }
+        guard try transaction.recoveryJournalData() == activeJournal,
+              try keychain.read(service: AuthTransaction.service, account: rotationKey) == marker,
+              try keychain.read(service: AuthTransaction.service, account: preservedKey) == archiveData,
+              try keychain.read(service: keychainService, account: keychainAccount) == beforeKeychain,
+              try files.read(authURL) == beforeFile, try files.read(configURL) == configSnapshot,
+              try keychain.read(service: KeychainSecretStore.service, account: account.id.uuidString) == currentVaultData else {
+            throw AgentSwapError.storage("현재 Claude 로그인 또는 복구 자료가 삭제 직전 변경되었습니다.")
+        }
+        if let activeJournal {
+            try transaction.deleteUncommittedNativeJournal(activeJournal, allowedLocations: nativeAuthLocations,
+                                                           expectedMutations: nativeRotationJournalMutations(expectedRaw: try requiredExpectedRaw(pending), nativeAfter: pending.nativeAfter))
+        }
+        guard try transaction.recoveryJournalData() == nil else {
+            throw AgentSwapError.storage("Claude 인증 복원 기록 삭제 결과를 확인하지 못했습니다.")
+        }
+        try locks.forEach { try $0.verify() }
+        guard try keychain.read(service: AuthTransaction.service, account: rotationKey) == marker,
+              try keychain.read(service: AuthTransaction.service, account: preservedKey) == archiveData,
+              try keychain.read(service: keychainService, account: keychainAccount) == beforeKeychain,
+              try files.read(authURL) == beforeFile, try files.read(configURL) == configSnapshot,
+              try keychain.read(service: KeychainSecretStore.service, account: account.id.uuidString) == currentVaultData else {
+            throw AgentSwapError.storage("현재 Claude 로그인 또는 복구 자료가 마지막 정리 중 변경되었습니다.")
+        }
+        try keychain.delete(service: AuthTransaction.service, account: rotationKey)
+        guard try keychain.read(service: AuthTransaction.service, account: rotationKey) == nil else {
+            throw AgentSwapError.storage("Claude 토큰 갱신 복원 자료 삭제 결과를 확인하지 못했습니다.")
+        }
+        retainedCredentials.removeValue(forKey: account.id)
+        persistedInactiveCredentials.removeValue(forKey: account.id)
+        persistedGenerations.removeValue(forKey: account.id)
+        return .init(account: account, credential: verified.credential)
+    }
+    /// Deletes only archives explicitly registered for this account. A marker or transaction may
+    /// still be the sole durable recovery material, so account deletion must leave it untouched.
+    func deletePreservedRecoveryCredentials(accountID: UUID) throws {
+        guard !refreshing else { throw AgentSwapError.storage("Claude 토큰 갱신이 진행 중입니다.") }
+        guard !(try pendingRecovery()) else {
+            throw AgentSwapError.storage("진행 중인 Claude 인증 복구가 있어 계정을 삭제할 수 없습니다.")
+        }
+        let indexKey = preservedRotationIndexKey(accountID: accountID)
+        guard let data = try keychain.read(service: AuthTransaction.service, account: indexKey) else { return }
+        let index = try decodePreservedIndex(data)
+        // An index is an ownership hint, never deletion authority by itself. Validate every
+        // present archive before deleting anything so a corrupted/cross-account index cannot
+        // erase recovery material belonging to another account. A missing archive is the safe
+        // crash window between index persistence and archive creation and remains retryable.
+        for hash in index.markerHashes {
+            let archiveKey = rotationKey + "|preserved|" + hash
+            guard let archiveData = try keychain.read(service: AuthTransaction.service, account: archiveKey) else { continue }
+            let archive: PreservedClaudeRotationArchive
+            do { archive = try JSONDecoder().decode(PreservedClaudeRotationArchive.self, from: archiveData) }
+            catch { throw AgentSwapError.storage("Claude 보존 복구 자료를 읽지 못했습니다.") }
+            guard archive.version == 1, preservedRotationHash(archive.originalRotationMarker) == hash,
+                  let pending = try? JSONDecoder().decode(PendingClaudeRotation.self, from: archive.originalRotationMarker),
+                  pending.accountID == accountID else {
+                throw AgentSwapError.unsupported("다른 Claude 계정의 보존 복구 자료가 있어 삭제를 중단했습니다.")
+            }
+        }
+        for hash in index.markerHashes {
+            let archiveKey = rotationKey + "|preserved|" + hash
+            try keychain.delete(service: AuthTransaction.service, account: archiveKey)
+            guard try keychain.read(service: AuthTransaction.service, account: archiveKey) == nil else {
+                throw AgentSwapError.storage("Claude 보존 복구 자료 삭제 결과를 확인하지 못했습니다.")
+            }
+        }
+        try keychain.delete(service: AuthTransaction.service, account: indexKey)
+        guard try keychain.read(service: AuthTransaction.service, account: indexKey) == nil else {
+            throw AgentSwapError.storage("Claude 보존 복구 목록 삭제 결과를 확인하지 못했습니다.")
+        }
+    }
+    private func registerPreservedArchive(_ markerHash: String, indexKey: String) throws {
+        let existing = try keychain.read(service: AuthTransaction.service, account: indexKey)
+        let hashes: [String]
+        if let existing { hashes = try decodePreservedIndex(existing).markerHashes }
+        else { hashes = [] }
+        guard hashes.contains(markerHash) || markerHashIsValid(markerHash) else {
+            throw AgentSwapError.storage("Claude 보존 복구 자료 식별자를 확인하지 못했습니다.")
+        }
+        let updated = hashes.contains(markerHash) ? hashes : (hashes + [markerHash]).sorted()
+        let data = try sortedIndexData(.init(markerHashes: updated))
+        if existing != data { try keychain.write(data, service: AuthTransaction.service, account: indexKey) }
+        guard try keychain.read(service: AuthTransaction.service, account: indexKey) == data else {
+            throw AgentSwapError.storage("Claude 보존 복구 목록의 저장 결과를 확인하지 못했습니다.")
+        }
+    }
+    private func hasPreservedIntent(marker: Data, accountID: UUID) throws -> Bool {
+        guard let data = try keychain.read(service: AuthTransaction.service,
+                                           account: preservedRotationIndexKey(accountID: accountID)) else { return false }
+        return try decodePreservedIndex(data).markerHashes.contains(preservedRotationHash(marker))
+    }
+    private func decodePreservedIndex(_ data: Data) throws -> PreservedClaudeRecoveryIndex {
+        let index: PreservedClaudeRecoveryIndex
+        do { index = try JSONDecoder().decode(PreservedClaudeRecoveryIndex.self, from: data) }
+        catch { throw AgentSwapError.storage("Claude 보존 복구 목록을 읽지 못했습니다.") }
+        guard index.version == 1, !index.markerHashes.isEmpty,
+              Set(index.markerHashes).count == index.markerHashes.count,
+              index.markerHashes.allSatisfy(markerHashIsValid) else {
+            throw AgentSwapError.unsupported("지원하지 않는 Claude 보존 복구 목록입니다.")
+        }
+        return index
+    }
+    private func markerHashIsValid(_ hash: String) -> Bool {
+        hash.count == 64 && hash.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+    private func validateRecoveryVault(_ vaultData: Data?, pending: PendingClaudeRotation, liveRaw: Data,
+                                       account: AccountRecord) throws {
+        guard let vaultData else { return }
+        let vault = try recoveryVaultCredential(vaultData, account: account)
+        guard vault.rawAuth == pending.expectedRaw || vault.rawAuth == pending.credential.rawAuth || vault.rawAuth == liveRaw else {
+            throw AgentSwapError.storage("Claude 계정 보관함 인증이 더 새로운 알 수 없는 세대여서 복구를 중단했습니다.")
+        }
+    }
+    private func requiredExpectedRaw(_ pending: PendingClaudeRotation) throws -> Data {
+        guard let raw = pending.expectedRaw else {
+            throw AgentSwapError.unsupported("토큰 갱신 복원 자료의 원본 인증 이미지가 없습니다.")
+        }
+        return raw
+    }
+    private func recoveryVaultCredential(_ vaultData: Data, account: AccountRecord) throws -> Credential {
+        let vault: Credential
+        do { vault = try JSONDecoder().decode(Credential.self, from: vaultData) }
+        catch { throw AgentSwapError.storage("Claude 계정 보관함 인증 형식을 확인하지 못했습니다.") }
+        let parsed = try CredentialParser.claude(rawAuth: vault.rawAuth, accountMetadata: vault.accountMetadata)
+        guard parsed.accessToken == vault.accessToken, parsed.refreshToken == vault.refreshToken,
+              try ProviderAccountParser.claude(vault).account.identity == account.identity else {
+            throw AgentSwapError.storage("Claude 계정 보관함 인증이 더 새로운 알 수 없는 세대여서 복구를 중단했습니다.")
+        }
+        return vault
     }
     private func cachedIdentityStatus(expectedMetadata: Data?, cachedMetadata: Data?) throws -> (complete: Bool, matches: Bool) {
         guard let expectedMetadata else { throw AgentSwapError.authentication("Claude 계정을 프로필로 확인한 뒤 다시 시도하세요.") }
@@ -387,6 +760,22 @@ public actor ClaudeAuthStore {
         var mutations = [AuthMutation(location: authLocation, before: beforeKeychain, after: nativeAfter)]
         if beforeFile != nil { mutations.append(.init(location: .file(authURL.path), before: beforeFile, after: nativeAfter)) }
         try transaction.perform(mutations) { try locks.forEach { try $0.verify() } }
+    }
+    /// Only the native writer's three source layouts are recoverable: Keychain-only,
+    /// Keychain plus mirror, or a file-only mirror. Their location-specific before-images
+    /// make an absent Keychain distinct from an absent file.
+    private func nativeRotationJournalMutations(expectedRaw: Data, nativeAfter: Data) -> [[AuthMutation]] {
+        let fileLocation = AuthMutation.Location.file(authURL.path)
+        let keychainMutation = AuthMutation(location: authLocation, before: expectedRaw, after: nativeAfter)
+        let fileMutation = AuthMutation(location: fileLocation, before: expectedRaw, after: nativeAfter)
+        return [
+            [keychainMutation],
+            [keychainMutation, fileMutation],
+            [
+                .init(location: authLocation, before: nil, after: nativeAfter),
+                fileMutation
+            ]
+        ]
     }
     /// Active refresh holds Claude's own refresh locks across the HTTP exchange; inactive refresh never writes live auth.
     /// The successor is saved immediately to the same injected application Keychain before updating provider stores.

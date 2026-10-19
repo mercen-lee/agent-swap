@@ -40,6 +40,10 @@ public protocol ProviderAdapter: Sendable {
                                   saveLatest: @Sendable (ImportedAccount) async throws -> Void) async -> SwitchResult
     func hasRunningConsumers() async -> Bool
     func recoverInterruptedSwitch() async throws
+    /// Preserves a verified, externally rotated Claude login while retaining the interrupted
+    /// rotation marker as an auditable recovery record.
+    func recoverKeepingCurrentLogin(account: AccountRecord) async throws -> ImportedAccount
+    func deletePreservedRecoveryCredentials(accountID: UUID) async throws
     /// Retained validated OAuth successors awaiting their first durable save. No new grant is exchanged.
     func hasPendingCredentialPersistence() async -> Bool
     func flushPendingCredentialPersistence() async throws
@@ -53,6 +57,10 @@ public extension ProviderAdapter {
     func openLoginPage() async throws { throw AgentSwapError.unsupported("진행 중인 로그인 페이지가 없습니다.") }
     func submitLoginCode(_ code: String) async throws { throw AgentSwapError.unsupported("이 로그인에는 인증 코드 입력이 지원되지 않습니다.") }
     func recoverInterruptedSwitch() async throws { throw AgentSwapError.unsupported("이 제공자에는 복구할 전환이 없습니다.") }
+    func recoverKeepingCurrentLogin(account: AccountRecord) async throws -> ImportedAccount {
+        throw AgentSwapError.unsupported("이 제공자에는 현재 로그인을 보존하는 복구가 없습니다.")
+    }
+    func deletePreservedRecoveryCredentials(accountID: UUID) async throws {}
     func hasPendingCredentialPersistence() async -> Bool { false }
     func flushPendingCredentialPersistence() async throws {}
     func takePersistedCredentialGenerations() async -> [PersistedCredentialGeneration] { [] }

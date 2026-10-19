@@ -7,7 +7,8 @@ import SwiftUI
 struct AgentSwapApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AgentSwapApp.isDemo
-        ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible)
+        ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible,
+                           claudeRecoveryConflict: AgentSwapApp.isDemo && CommandLine.arguments.contains("--demo-recovery-conflict"))
         : AppModel.live()
 
     fileprivate static var isDemo: Bool {
