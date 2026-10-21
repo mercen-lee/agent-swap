@@ -76,12 +76,14 @@ private actor SavedAccessProvider: ProviderAdapter {
     nonisolated let provider: Provider
     private(set) var calls: [String] = []
     private var fetchPause: SavedAccessPause?
+    private var nativeCurrent: ImportedAccount?
     private let events: SavedAccessEvents
 
     init(provider: Provider, events: SavedAccessEvents) { self.provider = provider; self.events = events }
     func compatibility() -> CompatibilityStatus { calls.append("compatibility"); return .supported("Fixture") }
     func importCurrent() throws -> ImportedAccount {
         calls.append("import")
+        if let nativeCurrent { return nativeCurrent }
         // Permission errors at startup preserve the cached current account. No native auth is used.
         throw AgentSwapError.storage("Fixture native credentials unavailable")
     }
@@ -104,6 +106,7 @@ private actor SavedAccessProvider: ProviderAdapter {
     func hasRunningConsumers() -> Bool { calls.append("consumers"); return false }
     func resetObservations() { calls.removeAll() }
     func pauseFetch(_ pause: SavedAccessPause) { fetchPause = pause }
+    func setNativeCurrent(_ current: ImportedAccount) { nativeCurrent = current }
 }
 
 @Suite("선택한 저장 인증 접근") @MainActor
@@ -156,8 +159,12 @@ struct CoreSavedCredentialAccessTests {
     }
 
     @Test("Missing or denied saved auth preserves all account and pending state", arguments: SavedAccessFailure.allCases)
-    fileprivate func failedAccessDoesNotChangeState(failure: SavedAccessFailure) async {
+    fileprivate func failedAccessDoesNotChangeState(failure: SavedAccessFailure) async throws {
         let fixture = await fixture(provider: .codex)
+        // Establish a readable source for the switch itself. Startup's permission-denied
+        // fixture must not authorize applying auth without a current source backup.
+        let sourceCredential = try #require(try await fixture.vault.load(accountID: fixture.source.id))
+        await fixture.provider.setNativeCurrent(.init(account: fixture.source, credential: sourceCredential))
         await fixture.model.switchAccount(fixture.selected.id)
         let before = fixture.model.state, pending = fixture.model.pendingSwitch, attention = fixture.model.attentionProviders
         #expect(pending[.codex] == fixture.selected.id)

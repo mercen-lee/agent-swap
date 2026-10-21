@@ -38,6 +38,29 @@ struct MenuBarView: View {
                 .controlSize(.small)
                 .disabled(!model.canOpenLoginPage || model.isOpeningLoginPage)
             }
+            Divider()
+            HStack {
+                Label("Claude Desktop", systemImage: "desktopcomputer")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Menu("프로필 열기") {
+                    Button("기존 Desktop 열기") { Task { await model.claudeDesktop.openDefault() } }
+                    ForEach(model.claudeDesktop.profiles) { profile in
+                        Button(profile.name) { Task { await model.claudeDesktop.openProfile(profile.id) } }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(model.claudeDesktop.isBusy)
+            }
+            if model.claudeDesktop.profiles.isEmpty {
+                Text("대시보드의 Claude Desktop에서 프로필을 추가하세요.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let message = model.claudeDesktop.message {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
             ForEach(Provider.allCases) { provider in
                 Divider()
                 providerSection(provider)

@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A00000000000000000000019 /* ClaudeDesktopProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000B /* ClaudeDesktopProfilesView.swift */; };
 		A00000000000000000000011 /* AgentSwapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000001 /* AgentSwapApp.swift */; };
 		A00000000000000000000012 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* DashboardView.swift */; };
 		A00000000000000000000013 /* AccountCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000003 /* AccountCard.swift */; };
@@ -17,6 +18,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A0000000000000000000000B /* ClaudeDesktopProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeDesktopProfilesView.swift; sourceTree = "<group>"; };
 		A00000000000000000000001 /* AgentSwapApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSwapApp.swift; sourceTree = "<group>"; };
 		A00000000000000000000002 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		A00000000000000000000003 /* AccountCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountCard.swift; sourceTree = "<group>"; };
@@ -41,7 +43,7 @@
 		};
 		A00000000000000000000031 /* AgentSwapApp */ = {
 			isa = PBXGroup;
-			children = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A00000000000000000000007, A00000000000000000000008,);
+			children = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A0000000000000000000000B, A00000000000000000000007, A00000000000000000000008,);
 			path = AgentSwapApp;
 			sourceTree = "<group>";
 		};
@@ -86,7 +88,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A00000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016,); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000019,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */

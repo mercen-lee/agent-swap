@@ -26,6 +26,8 @@ public protocol ProviderAdapter: Sendable {
     var provider: Provider { get }
     func compatibility() async -> CompatibilityStatus
     func importCurrent() async throws -> ImportedAccount
+    /// Nil means authoritative native auth is absent; access and format errors must still throw.
+    func importCurrentIfPresent() async throws -> ImportedAccount?
     func login() async throws -> ImportedAccount
     func cancelLogin() async
     /// A validated CLI fallback URL stays private to the runner and opens only on explicit request.
@@ -49,6 +51,7 @@ public protocol ProviderAdapter: Sendable {
 }
 
 public extension ProviderAdapter {
+    func importCurrentIfPresent() async throws -> ImportedAccount? { try await importCurrent() }
     func canOpenLoginPage() async -> Bool { false }
     func openLoginPage() async throws { throw AgentSwapError.unsupported("진행 중인 로그인 페이지가 없습니다.") }
     func submitLoginCode(_ code: String) async throws { throw AgentSwapError.unsupported("이 로그인에는 인증 코드 입력이 지원되지 않습니다.") }
@@ -63,7 +66,10 @@ public extension ProviderAdapter {
     }
     func activatePreservingSource(_ credential: Credential, account: AccountRecord, relaunch: Bool, saveLatest: @Sendable (ImportedAccount) async throws -> Void) async -> SwitchResult {
         do {
-            if let current = try? await importCurrent() { try await saveLatest(current) }
+            guard let current = try await importCurrentIfPresent() else {
+                throw AgentSwapError.storage("현재 인증이 없어 원본 백업을 확인하지 못했습니다.")
+            }
+            try await saveLatest(current)
             return await activate(credential, account: account, relaunch: relaunch)
         } catch { return .failed(message: "현재 인증 백업 실패: \(error.localizedDescription)") }
     }

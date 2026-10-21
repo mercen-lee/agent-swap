@@ -30,9 +30,12 @@ struct AgentSwapApp: App {
     }
 
     private static var initialWindowSize: CGSize {
-        let narrow = isDemo && (CommandLine.arguments.contains("--demo-narrow") ||
-                               Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoNarrow") as? Bool == true)
-        return narrow ? CGSize(width: 760, height: 520) : CGSize(width: 960, height: 680)
+        demoNarrow ? CGSize(width: 760, height: 520) : CGSize(width: 960, height: 680)
+    }
+
+    fileprivate static var demoNarrow: Bool {
+        isDemo && (CommandLine.arguments.contains("--demo-narrow") ||
+                   Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoNarrow") as? Bool == true)
     }
 
     private var needsAttention: Bool {
@@ -85,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var instanceLock: AppInstanceLock?
     private var hasPreparedLaunch = false
     private var isWaitingForTermination = false
+    private var hasSizedDemoWindow = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         prepareLaunch()
@@ -95,6 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         guard canStartModel else { return }
         self.model = model
         await model.start()
+        // A restored window frame otherwise overrides defaultSize, making --demo-narrow
+        // silently reuse the previous large window during layout verification.
+        if AgentSwapApp.demoNarrow, !hasSizedDemoWindow,
+           let window = NSApplication.shared.windows.first(where: { $0.isVisible && $0.canBecomeMain && $0.styleMask.contains(.resizable) }) {
+            window.setContentSize(NSSize(width: 760, height: 520))
+            hasSizedDemoWindow = true
+        }
     }
 
     private func prepareLaunch() {

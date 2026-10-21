@@ -12,6 +12,10 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     public func compatibility() async -> CompatibilityStatus { await authStore.compatibility() }
     public func recoverInterruptedSwitch() async throws { try await authStore.recoverInterruptedSwitch() }
     public func importCurrent() async throws -> ImportedAccount { try await identify(await authStore.read()) }
+    public func importCurrentIfPresent() async throws -> ImportedAccount? {
+        guard let credential = try await authStore.readIfPresent() else { return nil }
+        return try await identify(credential)
+    }
     public func login() async throws -> ImportedAccount { try await identify(await loginRunner.login(provider: provider)) }
     public func cancelLogin() async { await loginRunner.cancel() }
     public func canOpenLoginPage() async -> Bool { await loginRunner.canOpenLoginPage() }
@@ -159,6 +163,9 @@ public actor CodexProviderAdapter: ProviderAdapter {
         return .supported(status.message + " · 데스크톱 앱 미설치")
     }
     public func importCurrent() async throws -> ImportedAccount { try ProviderAccountParser.codex(await authStore.read()) }
+    public func importCurrentIfPresent() async throws -> ImportedAccount? {
+        try await authStore.readIfPresent().map(ProviderAccountParser.codex)
+    }
     public func login() async throws -> ImportedAccount { try ProviderAccountParser.codex(await loginRunner.login(provider: provider)) }
     public func cancelLogin() async { await loginRunner.cancel() }
     public func canOpenLoginPage() async -> Bool { await loginRunner.canOpenLoginPage() }

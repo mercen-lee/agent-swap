@@ -4,6 +4,7 @@ import CryptoKit
 
 @MainActor @Observable
 public final class AppModel {
+    public let claudeDesktop: ClaudeDesktopProfileModel
     public private(set) var state = PersistedState()
     public private(set) var compatibility: [Provider: CompatibilityStatus] = [:]
     public private(set) var isBusy = false
@@ -48,9 +49,12 @@ public final class AppModel {
     @ObservationIgnored private var isPreparingForTermination = false
     @ObservationIgnored private var operationWaiters: [(limit: Int, continuation: CheckedContinuation<Void, Never>)] = []
     public init(adapters: [any ProviderAdapter], secrets: any SecretStore, store: any StateStore,
-                claudeSessions: (any ClaudeDesktopSessionPreserving)? = nil) {
+                claudeSessions: (any ClaudeDesktopSessionPreserving)? = nil,
+                claudeDesktop: ClaudeDesktopProfileModel? = nil) {
         self.adapters = Dictionary(uniqueKeysWithValues: adapters.map { ($0.provider, $0) })
         self.secrets = secrets; self.store = store; self.claudeSessions = claudeSessions
+        self.claudeDesktop = claudeDesktop ?? .preview()
+        self.claudeDesktop.connectOperationQueue(operations)
     }
 
     deinit { scheduler?.cancel(); loginTask?.cancel() }
@@ -61,6 +65,7 @@ public final class AppModel {
     }
     private func startWithCurrentInteraction() async {
         guard !started, !isPreparingForTermination else { return }; started = true; isStarting = true; beginOperation()
+        await claudeDesktop.load()
         do { state = try await store.load() }
         catch { storageHealthy = false; message = "저장 데이터를 읽지 못했습니다. 원본을 보존합니다: \(error.localizedDescription)" }
         for provider in Provider.allCases {
@@ -161,19 +166,35 @@ public final class AppModel {
             try await flushPendingCredentials(account.provider)
             guard var credential = try await secrets.load(accountID: id) else { throw AgentSwapError.authentication("저장된 인증이 없습니다. 다시 로그인해 주세요.") }
             var isActive = state.activeAccounts[account.provider] == id
-            if isActive {
-                let imported = try await adapter.importCurrent()
-                if imported.account.identity == account.identity {
+            let running = await adapter.hasRunningConsumers()
+            var nativeIdentityUnknown = false
+            // The native login can change independently of the cached active account. In
+            // particular, a registered Codex account must not rotate a grant now owned by
+            // a running consumer just because its account row is encountered first.
+            if isActive || account.provider == .codex {
+                let imported: ImportedAccount?
+                do { imported = try await adapter.importCurrentIfPresent() }
+                catch {
+                    throw AgentSwapError.storage("현재 \(account.provider.title) 인증을 확인하지 못해 토큰 갱신을 보류했습니다. \(error.localizedDescription)")
+                }
+                if let imported, imported.account.identity == account.identity {
                     credential = try await reconcileNative(imported, accountID: id)
-                } else {
+                    state.activeAccounts[account.provider] = id
+                    isActive = true
+                } else if let imported {
                     let actualID = state.accounts.first(where: { $0.identity == imported.account.identity })?.id
                     state.activeAccounts[account.provider] = actualID
                     if let actualID { _ = try await reconcileNative(imported, accountID: actualID) }
                     isActive = false
+                } else {
+                    state.activeAccounts.removeValue(forKey: account.provider)
+                    isActive = false
+                    // A live process can still hold a grant after its native entry was
+                    // removed. Usage reads remain possible; refreshing it is not safe.
+                    nativeIdentityUnknown = true
                 }
             }
-            let running = await adapter.hasRunningConsumers()
-            let consumersRunning = account.provider == .codex && isActive && running
+            let consumersRunning = account.provider == .codex && running && (isActive || nativeIdentityUnknown)
             if isActive, account.provider == .claude || !running, state.pendingNativeRefreshPredecessor?[id] != nil {
                 let result = await applyToConfirmedCurrent(credential, account: account, adapter: adapter)
                 guard case .applied = result else { throw AgentSwapError.storage("저장된 새 \(account.provider.title) 인증의 적용을 기다립니다. 현재 계정을 확인한 뒤 다시 전환해 주세요.") }
@@ -197,7 +218,9 @@ public final class AppModel {
             var snapshot: UsageSnapshot
             do { snapshot = try await adapter.fetchUsage(credential, account: account) }
             catch let error as AgentSwapError {
-                if case .authentication = error, !consumersRunning {
+                if case .authentication = error, consumersRunning {
+                    snapshot = try await retryConsumerOwnedUsage(credential, account: account, adapter: adapter)
+                } else if case .authentication = error {
                     try await markNativeRefreshIfNeeded(credential, account: account, isActive: isActive)
                     let predecessor = credential
                     credential = try await adapter.refresh(credential, account: account)
@@ -232,6 +255,28 @@ public final class AppModel {
         // leave all target accounts blocked by an obsolete startup inspection.
         compatibility[account.provider] = await adapter.compatibility()
         await persist(); await finishOperation(account.provider)
+    }
+
+    private func retryConsumerOwnedUsage(_ credential: Credential, account: AccountRecord,
+                                         adapter: any ProviderAdapter) async throws -> UsageSnapshot {
+        let current: ImportedAccount?
+        do { current = try await adapter.importCurrentIfPresent() }
+        catch { throw AgentSwapError.storage("Codex가 관리하는 최신 인증을 확인하지 못했습니다. 마지막 정상 사용량을 유지합니다. \(error.localizedDescription)") }
+        let actualID = current.flatMap { native in state.accounts.first(where: { $0.identity == native.account.identity })?.id }
+        state.activeAccounts[account.provider] = actualID
+        let retryMessage = "Codex가 실행 중인 인증을 갱신할 때까지 사용량 조회를 기다립니다. 마지막 정상 값을 유지합니다."
+        guard let current else { throw AgentSwapError.network(retryMessage) }
+        guard current.account.identity == account.identity else {
+            if let actualID { _ = try await reconcileNative(current, accountID: actualID) }
+            throw AgentSwapError.network("현재 Codex 계정이 변경되었습니다. 다음 조회에서 최신 인증을 확인합니다.")
+        }
+        let latest = try await reconcileNative(current, accountID: account.id)
+        guard latest.accessToken != credential.accessToken else { throw AgentSwapError.network(retryMessage) }
+        do { return try await adapter.fetchUsage(latest, account: account) }
+        catch let error as AgentSwapError {
+            if case .authentication = error { throw AgentSwapError.network(retryMessage) }
+            throw error
+        }
     }
 
     public func importCurrent(_ provider: Provider) async {
@@ -429,7 +474,6 @@ public final class AppModel {
             let status = await adapter.compatibility(); compatibility[account.provider] = status
             guard status.canWrite else { throw AgentSwapError.unsupported(status.message) }
             let running = await adapter.hasRunningConsumers()
-            let activeAndRunning = account.provider == .codex && state.activeAccounts[account.provider] == id && running
             let current: ImportedAccount?
             if let fallbackSource {
                 guard let claudeSessions else { throw AgentSwapError.unsupported("로컬 대화 보존의 복구 상태를 확인할 수 없어 전환을 중단했습니다.") }
@@ -441,7 +485,17 @@ public final class AppModel {
                 try await claudeSessions.verifyCanSwitchWithoutPreservingSessions(source: source.account, target: account)
                 try validateCLIOnlySwitchState(account)
                 current = source
-            } else { current = try? await adapter.importCurrent() }
+            } else { current = try await adapter.importCurrentIfPresent() }
+            if let current {
+                // The CLI can switch outside AgentSwap between polls. Only the newly read
+                // identity determines which running consumer owns its one-time refresh grant.
+                state.activeAccounts[account.provider] = state.accounts.first(where: { $0.identity == current.account.identity })?.id
+            }
+            let isActive = current?.account.identity == account.identity
+            // An absent native store cannot prove that a saved target is inactive in a
+            // running consumer's memory. Leave its grant to Codex; activation still verifies
+            // graceful termination, the latest backup, and the exact native generation.
+            let activeAndRunning = account.provider == .codex && running && (current == nil || isActive)
             if let current, current.account.identity == account.identity {
                 credential = try await reconcileNative(current, accountID: id)
             }
@@ -711,10 +765,12 @@ public final class AppModel {
         guard !isPreparingForTermination else { return false }
         dismissClaudeCLIOnlySwitch()
         isPreparingForTermination = true; beginOperation()
+        claudeDesktop.beginTermination()
         let polling = scheduler
         stop()
         await cancelLogin()
         await polling?.value
+        await claudeDesktop.prepareForTermination()
         // Startup spans several provider queues while its busy count stays raised. Let it
         // finish before holding any queue it still needs for its next provider.
         await waitForOperations(limit: 1)
@@ -736,6 +792,7 @@ public final class AppModel {
         busyCount -= 1; isBusy = busyCount > 0; resumeOperationWaiters()
         if let failure {
             isPreparingForTermination = false
+            claudeDesktop.resumeAfterTerminationFailure()
             message = "갱신된 인증과 복구 상태의 저장을 마치지 못해 종료를 보류했습니다. \(failure)"
             startScheduler()
             return false

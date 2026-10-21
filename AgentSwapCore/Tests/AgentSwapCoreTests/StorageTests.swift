@@ -476,15 +476,29 @@ struct StorageTests {
         #expect(try fixture.files.read(fixture.directory.appendingPathComponent("auth.json")) == nil)
     }
 
-    @Test("An unreadable auto Keychain cannot be silently overwritten")
-    func codexUnreadableKeychain() async throws {
+    @Test("An unreadable auto Keychain is never mistaken for a file credential or an absent login", arguments: [false, true])
+    func codexUnreadableKeychain(hasFile: Bool) async throws {
         let fixture = try StorageFixture(); defer { fixture.cleanup() }
         let store = try fixture.codexStore(mode: "auto"), old = try fixture.codex()
-        try fixture.files.write(old.rawAuth, to: fixture.directory.appendingPathComponent("auth.json"))
+        let authURL = fixture.directory.appendingPathComponent("auth.json")
+        if hasFile { try fixture.files.write(old.rawAuth, to: authURL) }
         fixture.keychain.failRead(service: CodexAuthStore.keychainService, account: store.keychainAccount)
-        #expect(try await store.read().accessToken == "fixture-old")
+        await #expect(throws: AgentSwapError.self) { try await store.read() }
+        await #expect(throws: AgentSwapError.self) { try await store.readIfPresent() }
+        #expect(!(await store.compatibility()).canWrite)
         await #expect(throws: AgentSwapError.self) { try await store.activate(fixture.codex(token: "fixture-new")) }
-        #expect(try fixture.files.read(fixture.directory.appendingPathComponent("auth.json")) == old.rawAuth)
+        #expect(try fixture.files.read(authURL) == (hasFile ? old.rawAuth : nil))
+        #expect(fixture.keychain.journalCount() == 0)
+    }
+
+    @Test("A confirmed absent auto Keychain permits file fallback and a genuinely absent login")
+    func codexAbsentAutoKeychain() async throws {
+        let fixture = try StorageFixture(); defer { fixture.cleanup() }
+        let store = try fixture.codexStore(mode: "auto"), old = try fixture.codex()
+        #expect(try await store.readIfPresent() == nil)
+        try fixture.files.write(old.rawAuth, to: fixture.directory.appendingPathComponent("auth.json"))
+        #expect(try await store.readIfPresent()?.accessToken == old.accessToken)
+        #expect((await store.compatibility()).canWrite)
     }
 
     @Test("Codex rejects unknown target auth fields before changing any store", arguments: ["root", "tokens"])

@@ -3,7 +3,7 @@ import Foundation
 public extension AppModel {
     static func live() -> AppModel {
         AppModel(adapters: [ClaudeProviderAdapter(), CodexProviderAdapter()], secrets: KeychainSecretStore(), store: JSONStateStore(),
-                 claudeSessions: ClaudeDesktopSessionPreserver())
+                 claudeSessions: ClaudeDesktopSessionPreserver(), claudeDesktop: .live())
     }
 
     /// In-memory, deterministic fixture mode. Never reads or writes provider authentication.

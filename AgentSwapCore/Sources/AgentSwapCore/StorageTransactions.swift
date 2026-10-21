@@ -132,7 +132,14 @@ struct AuthTransaction {
         // must never begin a rollback whose later before-image cannot be written.
         for mutation in journal.mutations { try validateWrite(mutation.before, to: mutation.location) }
         for mutation in journal.mutations.reversed() {
-            if try read(mutation.location) != mutation.before { try apply(mutation.before, to: mutation.location) }
+            // Preflight may perform slow native helper/toolchain checks. Recheck each exact
+            // generation immediately before restoring so an external login or logout that
+            // occurred after the initial validation is never replaced by the old backup.
+            let current = try read(mutation.location)
+            guard current == mutation.before || current == mutation.after else {
+                throw AgentSwapError.storage("복원 준비 중 인증이 외부에서 변경되었습니다. 복원 자료를 Keychain에 보존했습니다.")
+            }
+            if current != mutation.before { try apply(mutation.before, to: mutation.location) }
         }
         try keychain.delete(service: Self.service, account: identifier)
     }

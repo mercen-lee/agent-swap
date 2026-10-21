@@ -62,12 +62,20 @@ enum ProviderHTTP {
         case 200..<300: return response.data
         case 400:
             let object = try? ProviderJSON.object(response.data)
-            let code = object?["error"] as? String ?? (object?["error"] as? [String: Any])?["code"] as? String
+            let details = object?["error"] as? [String: Any]
+            // Claude uses both OAuth's string error and its API-style nested type;
+            // Codex returns a nested code. Neither body's message is safe to display.
+            let code = object?["error"] as? String ?? details?["code"] as? String ?? details?["type"] as? String
             if ["invalid_grant", "refresh_token_expired", "refresh_token_reused", "refresh_token_invalid"].contains(code ?? "") {
                 throw AgentSwapError.authentication("갱신 토큰이 만료되었거나 이미 사용되었습니다. 다시 로그인하세요.")
             }
             throw AgentSwapError.network("서버가 요청을 거부했습니다 (HTTP 400).")
-        case 401, 403: throw AgentSwapError.authentication("인증이 만료되었거나 권한이 없습니다. 다시 로그인하세요.")
+        case 401: throw AgentSwapError.authentication("인증이 만료되었거나 유효하지 않습니다. 다시 로그인하세요.")
+        case 403:
+            // A valid token may lack a scope, subscription entitlement or organization
+            // permission. Refreshing it cannot resolve that denial and needlessly
+            // consumes a rotating refresh grant in the engine's authentication retry.
+            throw AgentSwapError.network("서버가 이 계정의 요청을 허용하지 않았습니다 (HTTP 403). 계정 권한이나 서비스 이용 상태를 확인해 주세요.")
         case 429:
             let retry: Date
             if let value = response.headers["retry-after"], let seconds = Double(value), seconds.isFinite { retry = now.addingTimeInterval(max(1, seconds)) }

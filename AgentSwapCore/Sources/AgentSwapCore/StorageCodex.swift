@@ -144,10 +144,9 @@ public actor CodexAuthStore {
         case .file: return try files.read(authURL)
         case .keychain: return try keychain.read(service: Self.keychainService, account: keychainAccount)
         case .auto:
-            // Codex itself falls back on missing/unavailable Keychain; a successful malformed value never falls back.
-            let stored: Data?
-            do { stored = try keychain.read(service: Self.keychainService, account: keychainAccount) }
-            catch { return try files.read(authURL) }
+            // An unreadable Keychain may shadow an obsolete file credential. Only confirmed
+            // absence permits fallback; an access error cannot establish refresh ownership.
+            let stored = try keychain.read(service: Self.keychainService, account: keychainAccount)
             return try stored ?? files.read(authURL)
         case .ephemeral: throw AgentSwapError.unsupported("Codex ephemeral 인증은 지원하지 않습니다.")
         }

@@ -144,6 +144,35 @@ private struct ProviderFixture {
 
 @Suite("Provider wire formats and process safety")
 struct ProviderTests {
+    @Test("An optional native import distinguishes absent authentication from unreadable or malformed data", arguments: [Provider.claude, Provider.codex])
+    func optionalNativeImport(_ provider: Provider) async throws {
+        let fixture = try ProviderFixture(); defer { fixture.cleanup() }
+        let adapter: any ProviderAdapter
+        let service: String
+        let account: String
+        switch provider {
+        case .claude:
+            let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
+            adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+            service = store.keychainService; account = store.keychainAccount
+        case .codex:
+            try AtomicAuthFileAccess().write(Data("cli_auth_credentials_store = 'keyring'".utf8), to: fixture.directory.appendingPathComponent("config.toml"))
+            let store = CodexAuthStore(home: fixture.directory, keychain: fixture.keychain)
+            adapter = CodexProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin(), processController: FixtureProcesses())
+            service = CodexAuthStore.keychainService; account = store.keychainAccount
+        }
+        #expect(try await adapter.importCurrentIfPresent() == nil)
+        fixture.keychain.refuseReads(service: service)
+        await #expect(throws: AgentSwapError.storage("Fixture native credential read failure")) {
+            try await adapter.importCurrentIfPresent()
+        }
+        fixture.keychain.refuseReads(service: nil)
+        fixture.keychain.write(Data("fixture-malformed-native-auth".utf8), service: service, account: account)
+        await #expect(throws: AgentSwapError.self) {
+            try await adapter.importCurrentIfPresent()
+        }
+    }
+
     @Test("Claude missing usage remains unknown and model windows remain display-only")
     func claudeWindows() throws {
         let data = Data(#"{"five_hour":{"utilization":91,"resets_at":"2026-10-14T03:00:00.123Z"},"seven_day":{"utilization":null,"resets_at":"2026-10-21T03:00:00Z"},"seven_day_sonnet":{"utilization":12},"future_model":{"utilization":25},"extra_usage":{"is_enabled":true,"monthly_limit":2000,"used_credits":25}}"#.utf8)

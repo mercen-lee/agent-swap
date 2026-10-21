@@ -2,14 +2,14 @@ import AgentSwapCore
 import SwiftUI
 
 private enum AccountFilter: String, CaseIterable, Identifiable {
-    case all, claude, codex
+    case desktop, all, claude, codex
     var id: String { rawValue }
     var provider: Provider? {
-        switch self { case .all: nil; case .claude: .claude; case .codex: .codex }
+        switch self { case .desktop, .all: nil; case .claude: .claude; case .codex: .codex }
     }
-    var title: String { provider?.title ?? "전체 계정" }
+    var title: String { self == .desktop ? "Claude Desktop" : provider?.title ?? "전체 계정" }
     var symbol: String {
-        switch self { case .all: "person.2"; case .claude: "sun.max"; case .codex: "terminal" }
+        switch self { case .desktop: "desktopcomputer"; case .all: "person.2"; case .claude: "sun.max"; case .codex: "terminal" }
     }
 }
 
@@ -20,7 +20,7 @@ private struct StatusMessage: Identifiable {
 
 struct DashboardView: View {
     let model: AppModel
-    @State private var filter: AccountFilter? = .all
+    @State private var filter: AccountFilter? = .desktop
     @State private var search = ""
     @State private var selectedID: UUID?
     @State private var showsInspector = true
@@ -45,43 +45,42 @@ struct DashboardView: View {
             NavigationSplitView {
                 sidebar
             } detail: {
-                accountListContent
-                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                detailContent
                     .navigationTitle(filter?.title ?? "전체 계정")
-                    .inspector(isPresented: $showsInspector) {
-                        inspector
-                            .inspectorColumnWidth(min: 260, ideal: 290, max: 360)
-                    }
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
             }
             .navigationSplitViewStyle(.balanced)
             .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
-            accountListFooter
+            if filter != .desktop { accountListFooter }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "계정 검색")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    Task { await model.refreshAll() }
-                } label: {
-                    Label("새로고침", systemImage: "arrow.clockwise")
+                if filter != .desktop {
+                    Button {
+                        Task { await model.refreshAll() }
+                    } label: {
+                        Label("새로고침", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.isBusy)
+                    .help("모든 계정 새로고침 (⌘R)")
+                    Button {
+                        isAddingAccount = true
+                    } label: {
+                        Label("계정 추가", systemImage: "plus")
+                    }
+                    .disabled(model.isLoggingIn)
                 }
-                .disabled(model.isBusy)
-                .help("모든 계정 새로고침 (⌘R)")
-                Button {
-                    isAddingAccount = true
-                } label: {
-                    Label("계정 추가", systemImage: "plus")
-                }
-                .disabled(model.isLoggingIn)
             }
             ToolbarItem(placement: .automatic) {
-                Button {
-                    showsInspector.toggle()
-                } label: {
-                    Label("계정 상세", systemImage: "sidebar.trailing")
+                if filter != .desktop {
+                    Button {
+                        showsInspector.toggle()
+                    } label: {
+                        Label("계정 상세", systemImage: "sidebar.trailing")
+                    }
+                    .help("계정 상세 보기")
                 }
-                .help("계정 상세 보기")
             }
         }
         .sheet(isPresented: $isAddingAccount) {
@@ -117,10 +116,27 @@ struct DashboardView: View {
         }
     }
 
+    @ViewBuilder
+    private var detailContent: some View {
+        if filter == .desktop {
+            ClaudeDesktopProfilesView(model: model.claudeDesktop, search: search)
+        } else {
+            accountListContent
+                .inspector(isPresented: $showsInspector) {
+                    inspector
+                        .inspectorColumnWidth(min: 260, ideal: 290, max: 360)
+                }
+        }
+    }
+
     private var sidebar: some View {
         List(selection: $filter) {
-            Section("계정") {
-                ForEach(AccountFilter.allCases) { item in
+            Section("데스크톱") {
+                Label("Claude Desktop", systemImage: "desktopcomputer")
+                    .tag(AccountFilter.desktop)
+            }
+            Section("CLI·Codex 계정") {
+                ForEach(AccountFilter.allCases.filter { $0 != .desktop }) { item in
                     HStack {
                         Label(item.title, systemImage: item.symbol)
                         Spacer()
