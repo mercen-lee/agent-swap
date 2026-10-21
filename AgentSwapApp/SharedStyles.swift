@@ -54,8 +54,8 @@ enum UsagePresentation {
         value.formatted(.number.precision(.fractionLength(0...1))) + "%"
     }
     static func resetCountdown(_ date: Date, now: Date) -> String {
+        if date <= now { return "초기화 시각 지남" }
         let seconds = max(0, Int(date.timeIntervalSince(now)))
-        if seconds == 0 { return "초기화 시각 지남" }
         let days = seconds / 86_400
         let hours = (seconds % 86_400) / 3_600
         let minutes = (seconds % 3_600) / 60
@@ -174,16 +174,36 @@ struct UsageProgress: View {
                     Text("\(UsagePresentation.percent(remaining)) 남음")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let resetsAt = window.resetsAt {
-                    TimelineView(.periodic(from: .now, by: 60)) { context in
-                        Text(UsagePresentation.resetCountdown(resetsAt, now: context.date))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text("초기화 \(resetsAt.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption).foregroundStyle(.secondary)
+            }
+            UsageResetInfo(resetsAt: window.resetsAt, compact: compact)
+        }
+    }
+}
+
+private struct UsageResetInfo: View {
+    let resetsAt: Date?
+    let compact: Bool
+
+    var body: some View {
+        Group {
+            if let resetsAt {
+                TimelineView(.periodic(from: .now, by: 60)) { context in
+                    Text(resetsAt > context.date
+                         ? "\(UsagePresentation.resetCountdown(resetsAt, now: context.date)) 초기화"
+                         : "초기화 시각 지남 · 갱신 대기")
                 }
+                Text(compact
+                     ? resetsAt.formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
+                     : "초기화 \(resetsAt.formatted(date: .abbreviated, time: .shortened))")
+                    .help(resetsAt.formatted(.dateTime.year().month().day().hour().minute().timeZone(.specificName(.short))))
+            } else {
+                Text("초기화 시각 미제공")
             }
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
     }
 }
 
