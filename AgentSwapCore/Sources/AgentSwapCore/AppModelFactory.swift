@@ -3,11 +3,11 @@ import Foundation
 public extension AppModel {
     static func live() -> AppModel {
         AppModel(adapters: [ClaudeProviderAdapter(), CodexProviderAdapter()], secrets: KeychainSecretStore(), store: JSONStateStore(),
-                 claudeSessions: ClaudeDesktopSessionPreserver(), claudeDesktop: .live())
+                 claudeSessions: ClaudeDesktopSessionPreserver(), claudeDesktop: ClaudeDesktopAccountManager(), claudeDesktopProfiles: .live())
     }
 
     /// In-memory, deterministic fixture mode. Never reads or writes provider authentication.
-    static func preview(claudeSessionIncompatible: Bool = false) -> AppModel {
+    static func preview(claudeSessionIncompatible: Bool = false, claudeRecoveryConflict: Bool = false) -> AppModel {
         let now = Date()
         var state = PersistedState()
         let claudePersonal = AccountRecord(identity: .init(provider: .claude, userID: "demo-claude-1", workspaceID: "personal"), nickname: "개인 계정", email: "personal@example.com", workspaceName: "개인 워크스페이스", plan: "Max", createdAt: now.addingTimeInterval(-300), automaticSwitchEligible: true)
@@ -30,20 +30,54 @@ public extension AppModel {
         let credential = Credential(accessToken: "demo-only", expiresAt: now.addingTimeInterval(3600), rawAuth: Data())
         let credentials = Dictionary(uniqueKeysWithValues: state.accounts.map { ($0.id, credential) })
         let adapters = Provider.allCases.map { provider in
-            DemoProvider(provider: provider, current: state.accounts.first { $0.provider == provider }!, credential: credential, snapshots: values)
+            DemoProvider(provider: provider, current: state.accounts.first { $0.provider == provider }!, credential: credential, snapshots: values,
+                         recoveryConflict: provider == .claude && claudeRecoveryConflict)
         }
+        // The legacy session fixture stays attached for journal-recovery UI coverage. Normal
+        // Claude switches no longer prepare or inspect Desktop conversations.
         let sessions: (any ClaudeDesktopSessionPreserving)? = claudeSessionIncompatible ? DemoSessionPreserver() : nil
         return AppModel(adapters: adapters, secrets: DemoSecrets(values: credentials), store: DemoState(value: state),
-                        claudeSessions: sessions)
+                        claudeSessions: sessions, claudeDesktop: DemoDesktopAccounts(current: claudePersonal))
     }
 }
 
-/// Reproduces the preflight-unavailable UI without inspecting Desktop records or processes.
+private actor DemoDesktopAccounts: ClaudeDesktopAccountManaging {
+    var current: AccountRecord
+    var pending: (UUID, AccountRecord)?
+    init(current: AccountRecord) { self.current = current }
+    func captureCurrent(for account: AccountRecord) throws {
+        guard current.identity == account.identity else {
+            throw AgentSwapError.authentication("선택한 계정으로 Desktop에 로그인한 뒤 저장해 주세요.")
+        }
+    }
+    func prepareSwitch(target: AccountRecord, registered: [AccountRecord], currentCLI: AccountIdentity?) throws -> UUID {
+        guard pending == nil else { throw AgentSwapError.storage("중단된 Desktop 전환을 먼저 복구해 주세요.") }
+        let id = UUID(); pending = (id, target); return id
+    }
+    func verifyCanSwitchCLI(allowing transactionID: UUID?) throws {
+        if let pending, pending.0 != transactionID { throw AgentSwapError.storage("중단된 Desktop 전환을 먼저 복구해 주세요.") }
+    }
+    func finish(transactionID: UUID, cliApplied: Bool) throws -> String {
+        guard let pending, pending.0 == transactionID else { throw AgentSwapError.storage("Desktop 준비 기록을 찾지 못했습니다.") }
+        if cliApplied { current = pending.1 }
+        self.pending = nil
+        return cliApplied ? "Desktop 계정과 기존 Code 대화를 연결했습니다. 데모 모드 · 임시 데이터" : "원래 Desktop 계정을 유지했습니다."
+    }
+    func recover(registered: [AccountRecord], currentCLI: AccountIdentity?) -> String {
+        pending = nil; return "Desktop 전환 복구를 완료했습니다. 데모 모드 · 임시 데이터"
+    }
+    func deleteSnapshot(accountID: UUID) throws {
+        guard pending == nil else { throw AgentSwapError.storage("중단된 Desktop 전환을 먼저 복구해 주세요.") }
+    }
+}
+
+/// Inert legacy session fixture. Authentication-only switching must never call its preparation APIs.
 private actor DemoSessionPreserver: ClaudeDesktopSessionPreserving {
     func prepareForSwitch(source: AccountRecord?, target: AccountRecord, relaunch: Bool) async throws -> ClaudeDesktopSessionPreparation {
         throw ClaudeDesktopSessionPreservationUnavailable(reason: .unsupportedRecordFields)
     }
     func verifyCanSwitchWithoutPreservingSessions(source: AccountRecord?, target: AccountRecord) async throws {}
+    func verifyCanOpenDesktop() async throws {}
     func finish(_ preparation: ClaudeDesktopSessionPreparation, applied: Bool) async throws -> String? { nil }
 }
 
@@ -65,16 +99,30 @@ private actor DemoProvider: ProviderAdapter {
     var current: AccountRecord
     let credential: Credential
     let snapshots: [UUID: UsageSnapshot]
-    init(provider: Provider, current: AccountRecord, credential: Credential, snapshots: [UUID: UsageSnapshot]) {
+    var recoveryConflict: Bool
+    init(provider: Provider, current: AccountRecord, credential: Credential, snapshots: [UUID: UsageSnapshot], recoveryConflict: Bool = false) {
         self.provider = provider; self.current = current; self.credential = credential; self.snapshots = snapshots
+        self.recoveryConflict = recoveryConflict
     }
-    func compatibility() -> CompatibilityStatus { .supported("데모 모드 · 임시 데이터") }
-    func importCurrent() -> ImportedAccount { .init(account: current, credential: credential) }
+    func compatibility() -> CompatibilityStatus {
+        recoveryConflict ? .readOnly("중단된 Claude 전환 또는 토큰 갱신의 복원이 필요합니다.") : .supported("데모 모드 · 임시 데이터")
+    }
+    func importCurrent() throws -> ImportedAccount {
+        guard !recoveryConflict else { throw AgentSwapError.storage("중단된 Claude 전환의 복원이 필요합니다.") }
+        return .init(account: current, credential: credential)
+    }
+    func recoverKeepingCurrentLogin(account: AccountRecord) throws -> ImportedAccount {
+        guard recoveryConflict, account.id == current.id, account.identity == current.identity,
+              KeychainInteraction.mode == .interactive else { throw AgentSwapError.storage("데모 복구 조건이 바뀌었습니다.") }
+        recoveryConflict = false
+        return .init(account: current, credential: credential)
+    }
     func login() throws -> ImportedAccount { throw AgentSwapError.unsupported("데모 모드에서는 실제 로그인을 진행하지 않습니다.") }
     func cancelLogin() {}
     func refresh(_ credential: Credential, account: AccountRecord) -> Credential { credential }
-    func fetchUsage(_ credential: Credential, account: AccountRecord) -> UsageSnapshot {
-        snapshots[account.id] ?? .init(windows: [])
+    func fetchUsage(_ credential: Credential, account: AccountRecord) throws -> UsageSnapshot {
+        guard !recoveryConflict else { throw AgentSwapError.storage("Claude 인증 복원을 완료한 뒤 갱신해 주세요.") }
+        return snapshots[account.id] ?? .init(windows: [])
     }
     func activate(_ credential: Credential, account: AccountRecord, relaunch: Bool) -> SwitchResult {
         current = account; return .applied(message: "데모 계정을 전환했습니다.")

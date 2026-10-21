@@ -1,16 +1,16 @@
-Generated with the built-in image_gen.imagegen tool on 2026-10-14.
+Generated with the built-in image_gen.imagegen tool on 2026-10-21.
 Transparent background requested; the generated alpha is preserved.
 The master is 1254×1254 pixels. scripts/generate-icon.swift only resizes it to the ten macOS AppIcon sizes, including 1024×1024.
-No reference images, provider trademarks, or text were used.
+No reference images, provider logos, or text were used.
 
 Final generation prompt:
 
 Use case: logo-brand.
-Asset type: native macOS app icon for AgentSwap, a calm account-switching utility.
-Primary request: a polished, distinctive icon built around two broad interlocking swap arrows, one pointing right and one pointing left, immediately recognizable at small Dock and menu sizes.
-Scene/backdrop: genuine transparent background outside the icon plate.
-Style/medium: restrained macOS icon rendering with softly sculpted glass depth, crisp silhouettes, refined edges, gentle realistic highlights, and generous negative space.
-Composition/framing: square 1024 by 1024 canvas. One centered rounded-square macOS icon plate occupies about 86% of the canvas width and height, with balanced transparent margins. The two arrows form one simple bold central symbol, with clear space between them.
-Color palette: a deep forest-green plate, warm cream and softly muted coral arrows. Keep the palette quiet and coherent.
-Lighting/mood: soft top-left studio light and subtle depth. The arrow colors must remain clear and legible, with only a light glass sheen.
-Constraints: clean geometry; large simple forms; transparent outside the rounded plate; no text, letters, numbers, watermark, provider logos or trademarks; no surrounding UI, no chrome, no decorative particles, no busy background. The icon should feel composed, native, and easy to identify at 16 pixels.
+Asset type: native macOS application icon for AgentSwap, an account switching utility.
+Primary request: Design a fresh, polished, modern icon showing two bold opposing rounded forms interlocking as a compact swap symbol. Make it feel like a thoughtful Mac utility.
+Scene/backdrop: A single centered soft squircle tile on a genuinely transparent background. Only the squircle and a delicate shadow; nothing outside it.
+Style/medium: Refined sculpted vector-like app icon; crisp precise silhouette, restrained satin depth with very subtle material highlights, no exaggerated gloss.
+Composition/framing: Square canvas. Tile occupies about 85 percent of canvas width with balanced transparent margins, corner radius native to macOS. The two forms occupy about 65 percent of the tile, visually balanced, clearly readable at 16 pixels. They suggest two rounded opposing arrows or a transfer between two accounts; generous central negative space.
+Color palette: Warm pale ivory tile. One form terracotta coral (#D97757), the other dark graphite with a restrained forest-green nuance. Simple two-tone composition, high contrast, quiet and elegant.
+Lighting/mood: Soft top-left light, shallow gentle depth, calm and confident.
+Constraints: One icon only. Preserve actual alpha outside the tile. No text, letters, numbers, watermark, provider logos, OpenAI knot, Claude starburst, robot, face, brain, AI sparkles, neon gradients, multicolored ribbons, busy texture, surrounding UI or extra decorations. Large simple forms and clean edges.

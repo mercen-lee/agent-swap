@@ -4,7 +4,7 @@ import CryptoKit
 
 @MainActor @Observable
 public final class AppModel {
-    public let claudeDesktop: ClaudeDesktopProfileModel
+    public let claudeDesktopProfiles: ClaudeDesktopProfileModel
     public private(set) var state = PersistedState()
     public private(set) var compatibility: [Provider: CompatibilityStatus] = [:]
     public private(set) var isBusy = false
@@ -17,7 +17,10 @@ public final class AppModel {
     public private(set) var isSubmittingLoginCode = false
     public private(set) var canOpenLoginPage = false
     public private(set) var isOpeningLoginPage = false
-    public private(set) var claudeCLIOnlySwitchTarget: UUID?
+    /// A legacy Desktop-session transaction exists and requires an explicit recovery action.
+    /// Normal authentication switches never inspect or modify Desktop conversation records.
+    public private(set) var claudeSessionRecoveryRequired = false
+    public private(set) var claudeDesktopRecoveryRequired = false
 
     /// UI and the engine share the lifecycle/storage blockers; a rejected operation must be explainable.
     public var switchOperationBlockReason: String? {
@@ -33,10 +36,10 @@ public final class AppModel {
     @ObservationIgnored private let store: any StateStore
     @ObservationIgnored private let operations = AccountOperationQueue()
     @ObservationIgnored private let claudeSessions: (any ClaudeDesktopSessionPreserving)?
+    @ObservationIgnored private let claudeDesktop: (any ClaudeDesktopAccountManaging)?
     @ObservationIgnored private var scheduler: Task<Void, Never>?
     @ObservationIgnored private var loginTask: Task<Void, Never>?
     @ObservationIgnored private var loginGeneration: UUID?
-    @ObservationIgnored private var claudeCLIOnlySwitchRequest: ClaudeCLIOnlySwitchRequest?
     @ObservationIgnored private var started = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var busyCount = 0
@@ -50,11 +53,15 @@ public final class AppModel {
     @ObservationIgnored private var operationWaiters: [(limit: Int, continuation: CheckedContinuation<Void, Never>)] = []
     public init(adapters: [any ProviderAdapter], secrets: any SecretStore, store: any StateStore,
                 claudeSessions: (any ClaudeDesktopSessionPreserving)? = nil,
-                claudeDesktop: ClaudeDesktopProfileModel? = nil) {
+                claudeDesktop: (any ClaudeDesktopAccountManaging)? = nil,
+                claudeDesktopProfiles: ClaudeDesktopProfileModel? = nil) {
         self.adapters = Dictionary(uniqueKeysWithValues: adapters.map { ($0.provider, $0) })
-        self.secrets = secrets; self.store = store; self.claudeSessions = claudeSessions
-        self.claudeDesktop = claudeDesktop ?? .preview()
-        self.claudeDesktop.connectOperationQueue(operations)
+        self.secrets = secrets; self.store = store; self.claudeSessions = claudeSessions; self.claudeDesktop = claudeDesktop
+        self.claudeDesktopProfiles = claudeDesktopProfiles ?? .preview()
+        self.claudeDesktopProfiles.connectOperationQueue(operations) {
+            try await claudeSessions?.verifyCanOpenDesktop()
+            try await claudeDesktop?.verifyCanSwitchCLI(allowing: nil)
+        }
     }
 
     deinit { scheduler?.cancel(); loginTask?.cancel() }
@@ -65,7 +72,7 @@ public final class AppModel {
     }
     private func startWithCurrentInteraction() async {
         guard !started, !isPreparingForTermination else { return }; started = true; isStarting = true; beginOperation()
-        await claudeDesktop.load()
+        await claudeDesktopProfiles.load()
         do { state = try await store.load() }
         catch { storageHealthy = false; message = "저장 데이터를 읽지 못했습니다. 원본을 보존합니다: \(error.localizedDescription)" }
         for provider in Provider.allCases {
@@ -89,6 +96,15 @@ public final class AppModel {
                     state.activeAccounts.removeValue(forKey: provider)
                     if state.accounts.contains(where: { $0.provider == provider }) { message = error.localizedDescription }
                 } else { message = error.localizedDescription }
+            }
+            if provider == .claude, storageHealthy, let claudeDesktop {
+                do {
+                    try await claudeDesktop.verifyCanSwitchCLI(allowing: nil)
+                    claudeDesktopRecoveryRequired = false
+                } catch {
+                    claudeDesktopRecoveryRequired = true
+                    message = error.localizedDescription
+                }
             }
             await operations.release(provider)
         }
@@ -175,7 +191,10 @@ public final class AppModel {
                 let imported: ImportedAccount?
                 do { imported = try await adapter.importCurrentIfPresent() }
                 catch {
-                    throw AgentSwapError.storage("현재 \(account.provider.title) 인증을 확인하지 못해 토큰 갱신을 보류했습니다. \(error.localizedDescription)")
+                    if account.provider == .codex {
+                        throw AgentSwapError.storage("현재 Codex 인증을 확인하지 못해 토큰 갱신을 보류했습니다. \(error.localizedDescription)")
+                    }
+                    throw error
                 }
                 if let imported, imported.account.identity == account.identity {
                     credential = try await reconcileNative(imported, accountID: id)
@@ -284,7 +303,6 @@ public final class AppModel {
     }
     private func importCurrentWithInteraction(_ provider: Provider) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, let adapter = adapters[provider] else { return }
-        dismissClaudeCLIOnlySwitch()
         await operations.acquire(provider); beginOperation()
         guard !isPreparingForTermination else { await finishOperation(provider); return }
         do {
@@ -304,7 +322,6 @@ public final class AppModel {
     }
     private func loginWithInteraction(_ provider: Provider) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, !isLoggingIn, let adapter = adapters[provider] else { return }
-        dismissClaudeCLIOnlySwitch()
         isLoggingIn = true; loggingInProvider = provider
         let generation = UUID(); loginGeneration = generation
         canOpenLoginPage = false; isOpeningLoginPage = false
@@ -424,49 +441,16 @@ public final class AppModel {
     public func switchAccount(_ id: UUID, relaunch: Bool = false) async {
         await KeychainInteraction.$mode.withValue(.interactive) { await switchAccountWithCurrentInteraction(id, relaunch: relaunch) }
     }
-    private struct ClaudeCLIOnlySwitchRequest: Equatable {
-        let nonce = UUID()
-        let targetID: UUID
-        let targetIdentity: AccountIdentity
-        let sourceIdentity: AccountIdentity
-    }
-    private enum ClaudeSessionSwitchMode {
-        case preserving
-        case cliOnly(ClaudeCLIOnlySwitchRequest)
-    }
-    public func dismissClaudeCLIOnlySwitch() {
-        claudeCLIOnlySwitchRequest = nil; claudeCLIOnlySwitchTarget = nil
-    }
-    /// A CLI-only switch requires a prior typed, pre-mutation preservation failure and an
-    /// explicit user action. Automatic and ordinary switches always retain preservation.
-    public func switchClaudeCLIOnly(_ id: UUID) async {
-        await KeychainInteraction.$mode.withValue(.interactive) {
-            guard let request = self.claudeCLIOnlySwitchRequest, request.targetID == id else { return }
-            await self.switchAccountWithCurrentInteraction(id, relaunch: false, sessionMode: .cliOnly(request))
+    @discardableResult
+    private func switchAccountWithCurrentInteraction(_ id: UUID, relaunch: Bool, queueAlreadyHeld: Bool = false,
+                                                     desktopPreparation: UUID? = nil) async -> Bool {
+        guard storageHealthy, !isStarting, !isPreparingForTermination, let account = state.accounts.first(where: { $0.id == id }), let adapter = adapters[account.provider] else { return false }
+        if !queueAlreadyHeld { await operations.acquire(account.provider); beginOperation() }
+        guard !isPreparingForTermination else {
+            if !queueAlreadyHeld { await finishOperation(account.provider) }
+            return false
         }
-    }
-    private func switchAccountWithCurrentInteraction(_ id: UUID, relaunch: Bool,
-                                                    sessionMode: ClaudeSessionSwitchMode = .preserving) async {
-        guard storageHealthy, !isStarting, !isPreparingForTermination, let account = state.accounts.first(where: { $0.id == id }), let adapter = adapters[account.provider] else { return }
-        await operations.acquire(account.provider); beginOperation()
-        guard !isPreparingForTermination else { await finishOperation(account.provider); return }
-        var fallbackSource: AccountIdentity?
-        if case .cliOnly(let request) = sessionMode {
-            guard claudeCLIOnlySwitchRequest == request else {
-                await finishOperation(account.provider); return
-            }
-            guard storageHealthy, !Task.isCancelled, account.provider == .claude,
-                  let selected = state.accounts.first(where: { $0.id == id }),
-                  selected.identity == request.targetIdentity, selected.authenticationState == .valid else {
-                dismissClaudeCLIOnlySwitch()
-                message = "전환 조건이 바뀌었습니다. 대상 계정을 선택하고 대화 보존을 다시 확인해 주세요."
-                await finishOperation(account.provider); return
-            }
-            fallbackSource = request.sourceIdentity
-        }
-        // Consume the offer once the queued action begins. Dismissed/replaced queued requests
-        // cannot reuse an earlier error to bypass the preservation step.
-        dismissClaudeCLIOnlySwitch()
+        var applied = false
         do {
             try Task.checkCancellation()
             try await flushPendingCredentials(account.provider)
@@ -475,17 +459,11 @@ public final class AppModel {
             guard status.canWrite else { throw AgentSwapError.unsupported(status.message) }
             let running = await adapter.hasRunningConsumers()
             let current: ImportedAccount?
-            if let fallbackSource {
-                guard let claudeSessions else { throw AgentSwapError.unsupported("로컬 대화 보존의 복구 상태를 확인할 수 없어 전환을 중단했습니다.") }
-                let source = try await adapter.importCurrent()
-                guard source.account.identity == fallbackSource else {
-                    throw AgentSwapError.storage("현재 Claude 계정이 바뀌었습니다. 대상 계정을 선택하고 대화 보존을 다시 확인해 주세요.")
-                }
-                try Task.checkCancellation()
-                try await claudeSessions.verifyCanSwitchWithoutPreservingSessions(source: source.account, target: account)
-                try validateCLIOnlySwitchState(account)
-                current = source
-            } else { current = try await adapter.importCurrentIfPresent() }
+            current = try await adapter.importCurrentIfPresent()
+            if account.provider == .claude {
+                try await verifyClaudeSessionSwitchBoundary(source: current?.account, target: account, desktopPreparation: desktopPreparation)
+                try validateClaudeSwitchState(account)
+            }
             if let current {
                 // The CLI can switch outside AgentSwap between polls. Only the newly read
                 // identity determines which running consumer owns its one-time refresh grant.
@@ -505,78 +483,193 @@ public final class AppModel {
                 credential = try await adapter.refresh(credential, account: account)
                 try await saveRotatedCredential(credential, predecessor: predecessor, accountID: id)
             }
-            var sessionPreparation = ClaudeDesktopSessionPreparation.notNeeded
-            if fallbackSource == nil, account.provider == .claude, let claudeSessions {
-                // The actual CLI source selects the source bucket. Desktop login remains independent;
-                // source records are retained, so preparing the target never empties its current sidebar.
-                do {
-                    sessionPreparation = try await claudeSessions.prepareForSwitch(source: current?.account, target: account, relaunch: relaunch)
-                } catch let error as ClaudeDesktopSessionPreservationUnavailable {
-                    try Task.checkCancellation()
-                    if storageHealthy, !isPreparingForTermination, let current,
-                       state.accounts.contains(where: { $0.id == id && $0.identity == account.identity }) {
-                        claudeCLIOnlySwitchRequest = .init(targetID: id, targetIdentity: account.identity, sourceIdentity: current.account.identity)
-                        claudeCLIOnlySwitchTarget = id
-                    }
-                    throw error
-                }
-                if case .pendingRelaunch(let text) = sessionPreparation {
-                    pendingSwitch[.claude] = id; attentionProviders.insert(.claude); message = text
-                    await persist(); await finishOperation(.claude); return
-                }
-                do { try Task.checkCancellation() }
-                catch {
-                    _ = try await claudeSessions.finish(sessionPreparation, applied: false)
-                    throw error
-                }
+            if account.provider == .claude {
+                try await verifyClaudeSessionSwitchBoundary(source: current?.account, target: account, desktopPreparation: desktopPreparation)
+                try validateClaudeSwitchState(account)
             }
-            let expectedSessionSource = fallbackSource ?? (account.provider == .claude && claudeSessions != nil ? current?.account.identity : nil)
-            let fallbackSessionVerifier = fallbackSource == nil ? nil : claudeSessions
+            let expectedSourceIdentity = account.provider == .claude ? current?.account.identity : nil
             let result = await adapter.activatePreservingSource(credential, account: account, relaunch: relaunch,
                                                                 allowMissingSource: current == nil) { [weak self] current in
                 try Task.checkCancellation()
-                if let expectedSessionSource, current.account.identity != expectedSessionSource {
-                    throw AgentSwapError.storage("세션 보존 중 현재 Claude 계정이 외부에서 바뀌어 전환을 중단했습니다.")
+                if let expectedSourceIdentity, current.account.identity != expectedSourceIdentity {
+                    guard let self else { throw CancellationError() }
+                    try await self.rejectChangedClaudeSource(current)
                 }
                 try await self?.saveLatestSource(current)
                 try Task.checkCancellation()
-                // Target refresh and source backup can suspend. Recheck the independent Code
-                // recovery boundary at the final callback before native authentication writes.
-                if let fallbackSessionVerifier {
-                    try await fallbackSessionVerifier.verifyCanSwitchWithoutPreservingSessions(source: current.account, target: account)
+                if account.provider == .claude {
+                    try await self?.verifyClaudeSessionSwitchBoundary(source: current.account, target: account, desktopPreparation: desktopPreparation)
                     guard let self else { throw CancellationError() }
-                    try await self.validateCLIOnlySwitchState(account)
+                    try await self.validateClaudeSwitchState(account)
                 }
-            }
-            var sessionNotice: String?
-            if fallbackSource == nil, account.provider == .claude, let claudeSessions {
-                let applied: Bool
-                if case .applied = result { applied = true } else { applied = false }
-                do { sessionNotice = try await claudeSessions.finish(sessionPreparation, applied: applied) }
-                catch { sessionNotice = "Code 세션 보존 상태를 확인하지 못했습니다: \(error.localizedDescription)" }
             }
             switch result {
             case .applied(let text):
+                applied = true
                 clearPendingRefresh(id)
                 attentionProviders.remove(account.provider)
                 state.activeAccounts[account.provider] = id; state.lastSwitch[account.provider] = Date()
                 pendingSwitch.removeValue(forKey: account.provider); message = text
-                if fallbackSource != nil {
-                    message = [text, "CLI 계정만 전환했습니다. 기존 Code 대화 파일과 목록은 변경하지 않았습니다. Claude 데스크톱 로그인은 CLI 로그인과 별개입니다."].joined(separator: "\n")
+                if account.provider == .claude {
+                    message = "CLI 계정을 전환했습니다. 기존 대화 파일과 목록은 변경하지 않았습니다. Claude 데스크톱 로그인은 별도로 전환해 주세요."
                 }
             case .pendingRelaunch(let text): pendingSwitch[account.provider] = id; attentionProviders.insert(account.provider); message = text
             case .failed(let text): attentionProviders.insert(account.provider); message = text
             }
-            if let sessionNotice { message = [message, sessionNotice].compactMap { $0 }.joined(separator: "\n") }
             await persist()
         } catch { message = error.localizedDescription }
-        await finishOperation(account.provider)
+        if !queueAlreadyHeld { await finishOperation(account.provider) }
+        return applied
     }
-    private func validateCLIOnlySwitchState(_ account: AccountRecord) throws {
+    /// Blocks authentication writes while an older Desktop-session transaction is unresolved.
+    /// It intentionally examines only the AgentSwap recovery journal, not Desktop conversations.
+    private func verifyClaudeSessionSwitchBoundary(source: AccountRecord?, target: AccountRecord, desktopPreparation: UUID? = nil) async throws {
+        if let claudeSessions {
+            do {
+                try await claudeSessions.verifyCanSwitchWithoutPreservingSessions(source: source, target: target)
+                claudeSessionRecoveryRequired = false
+            } catch is CancellationError { throw CancellationError() }
+            catch { claudeSessionRecoveryRequired = true; throw error }
+        }
+        if let claudeDesktop {
+            do {
+                try await claudeDesktop.verifyCanSwitchCLI(allowing: desktopPreparation)
+                claudeDesktopRecoveryRequired = false
+            } catch is CancellationError { throw CancellationError() }
+            catch { claudeDesktopRecoveryRequired = true; throw error }
+        }
+    }
+    private func validateClaudeSwitchState(_ account: AccountRecord) throws {
         try Task.checkCancellation()
         guard storageHealthy, !isPreparingForTermination,
               state.accounts.contains(where: { $0.id == account.id && $0.identity == account.identity && $0.authenticationState == .valid }) else {
-            throw AgentSwapError.storage("전환 조건이 바뀌어 Claude 계정 변경을 중단했습니다.")
+            throw AgentSwapError.storage("Claude 계정 전환 조건이 바뀌어 전환을 중단했습니다.")
+        }
+    }
+    /// Captures only a Desktop login that independently matches the selected account.
+    public func captureClaudeDesktopLogin(_ id: UUID) async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard storageHealthy, !isStarting, !isPreparingForTermination, let claudeDesktop,
+                  let account = state.accounts.first(where: { $0.id == id && $0.provider == .claude }) else { return }
+            await operations.acquire(.claude); beginOperation()
+            do {
+                try Task.checkCancellation()
+                guard storageHealthy, !isPreparingForTermination,
+                      state.accounts.contains(where: { $0.id == id && $0.identity == account.identity }) else { throw CancellationError() }
+                try await verifyClaudeSessionSwitchBoundary(source: nil, target: account)
+                try Task.checkCancellation()
+                try await claudeDesktop.captureCurrent(for: account)
+                message = "이 계정의 Desktop 로그인을 Keychain에 저장했습니다."
+            } catch { message = error.localizedDescription }
+            await finishOperation(.claude)
+        }
+    }
+    /// An explicit manual operation: the regular and automatic switch paths stay CLI-only.
+    public func switchClaudeDesktopAccount(_ id: UUID) async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard storageHealthy, !isStarting, !isPreparingForTermination, let claudeDesktop,
+                  let adapter = adapters[.claude],
+                  let account = state.accounts.first(where: { $0.id == id && $0.provider == .claude }) else { return }
+            await operations.acquire(.claude); beginOperation()
+            var preparation: UUID?
+            var needsAbort = false
+            var cliApplied = false
+            do {
+                try validateClaudeSwitchState(account)
+                let status = await adapter.compatibility(); compatibility[.claude] = status
+                guard status.canWrite else { throw AgentSwapError.unsupported(status.message) }
+                let currentCLI: AccountIdentity?
+                do { currentCLI = try await adapter.importCurrent().account.identity }
+                catch let error as AgentSwapError {
+                    guard case .authentication = error else { throw error }
+                    currentCLI = nil
+                }
+                try await verifyClaudeSessionSwitchBoundary(source: state.accounts.first { $0.identity == currentCLI }, target: account)
+                try validateClaudeSwitchState(account)
+                let transactionID = try await claudeDesktop.prepareSwitch(target: account,
+                    registered: state.accounts.filter { $0.provider == .claude }, currentCLI: currentCLI)
+                preparation = transactionID; needsAbort = true
+                try validateClaudeSwitchState(account)
+                cliApplied = await switchAccountWithCurrentInteraction(id, relaunch: false, queueAlreadyHeld: true,
+                                                                       desktopPreparation: transactionID)
+                let cliMessage = message
+                needsAbort = false
+                let detail = try await claudeDesktop.finish(transactionID: transactionID, cliApplied: cliApplied)
+                claudeDesktopRecoveryRequired = false
+                message = cliApplied ? "CLI와 Desktop 전환을 적용했습니다. \(detail)" : "\(cliMessage ?? "CLI 전환을 완료하지 못했습니다.") \(detail)"
+            } catch {
+                var detail = error.localizedDescription
+                if needsAbort, let preparation {
+                    do { _ = try await claudeDesktop.finish(transactionID: preparation, cliApplied: false) }
+                    catch { claudeDesktopRecoveryRequired = true; detail += " Desktop 준비 복구가 필요합니다: \(error.localizedDescription)" }
+                } else if preparation != nil { claudeDesktopRecoveryRequired = true }
+                message = cliApplied ? "CLI는 선택한 계정으로 전환됐습니다. Desktop 전환은 완료하지 못했습니다: \(detail)" : detail
+            }
+            await finishOperation(.claude)
+        }
+    }
+    public func recoverClaudeDesktopSwitch() async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard storageHealthy, !isStarting, !isPreparingForTermination, let claudeDesktop,
+                  let adapter = adapters[.claude] else { return }
+            await operations.acquire(.claude); beginOperation()
+            do {
+                try Task.checkCancellation()
+                guard !isPreparingForTermination else { throw CancellationError() }
+                let currentCLI: AccountIdentity?
+                do { currentCLI = try await adapter.importCurrent().account.identity }
+                catch let error as AgentSwapError {
+                    guard case .authentication = error else { throw error }
+                    currentCLI = nil
+                }
+                message = try await claudeDesktop.recover(registered: state.accounts.filter { $0.provider == .claude }, currentCLI: currentCLI)
+                claudeDesktopRecoveryRequired = false
+            } catch { claudeDesktopRecoveryRequired = true; message = error.localizedDescription }
+            await finishOperation(.claude)
+        }
+    }
+    /// The adapter re-read a different Claude identity after source backup began. Reflect that
+    /// observation in active metadata, but never save it or continue the target auth write.
+    private func rejectChangedClaudeSource(_ current: ImportedAccount) throws {
+        let registeredID = state.accounts.first(where: { $0.identity == current.account.identity })?.id
+        if let registeredID { state.activeAccounts[.claude] = registeredID }
+        else { state.activeAccounts.removeValue(forKey: .claude) }
+        guard registeredID != nil else {
+            throw AgentSwapError.storage("현재 Claude 계정이 앱에 등록되어 있지 않아 인증을 보존하고 전환을 보류했습니다. 현재 로그인 가져오기로 등록한 뒤 다시 전환해 주세요.")
+        }
+        throw AgentSwapError.storage("현재 Claude 계정이 외부에서 변경되어 전환을 중단했습니다.")
+    }
+    /// Explicitly resumes only a previously-created legacy Desktop-session recovery journal.
+    /// Same source/target identity makes `prepareForSwitch` run its recovery check before it can
+    /// inventory, publish, stop, or relaunch Claude Desktop.
+    public func recoverInterruptedClaudeSessions() async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard storageHealthy, !isStarting, !isPreparingForTermination,
+                  let adapter = adapters[.claude], let claudeSessions else { return }
+            await operations.acquire(.claude); beginOperation()
+            guard !isPreparingForTermination else { await finishOperation(.claude); return }
+            do {
+                let current = try await adapter.importCurrent()
+                guard state.accounts.contains(where: { $0.provider == .claude && $0.identity == current.account.identity }) else {
+                    throw AgentSwapError.storage("현재 Claude 계정을 가져온 뒤 중단된 대화 목록 복구를 다시 시도해 주세요.")
+                }
+                let recovery = try await claudeSessions.prepareForSwitch(source: current.account, target: current.account, relaunch: false)
+                switch recovery {
+                case .notNeeded:
+                    claudeSessionRecoveryRequired = false
+                    message = "중단된 Claude 대화 목록 복구를 완료했습니다. CLI 인증은 변경하지 않았습니다."
+                case .pendingRelaunch(let detail):
+                    claudeSessionRecoveryRequired = true
+                    message = "Claude를 직접 정상 종료한 뒤 대화 목록 복구를 다시 시도해 주세요. \(detail)"
+                case .prepared:
+                    claudeSessionRecoveryRequired = true
+                    throw AgentSwapError.storage("중단된 대화 목록 복구 상태를 확인하지 못했습니다. 인증 변경을 중단했습니다.")
+                }
+            } catch {
+                claudeSessionRecoveryRequired = true
+                message = error.localizedDescription
+            }
+            await finishOperation(.claude)
         }
     }
     private func evaluateAutomaticSwitch(_ provider: Provider, now: Date) async {
@@ -697,10 +790,11 @@ public final class AppModel {
     }
     private func deleteAccountWithInteraction(_ id: UUID) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, let account = state.accounts.first(where: { $0.id == id }) else { return }
-        dismissClaudeCLIOnlySwitch()
         await operations.acquire(account.provider)
         guard !isPreparingForTermination else { await operations.release(account.provider); return }
         do {
+            try await adapters[account.provider]?.deletePreservedRecoveryCredentials(accountID: id)
+            if account.provider == .claude { try await claudeDesktop?.deleteSnapshot(accountID: id) }
             try await secrets.delete(accountID: id)
             await adapters[account.provider]?.discardPendingCredentialPersistence(accountID: id)
             discardRetainedCredential(id)
@@ -729,6 +823,48 @@ public final class AppModel {
     public func recoverInterruptedSwitch(_ provider: Provider) async {
         await KeychainInteraction.$mode.withValue(.interactive) { await recoverInterruptedSwitchWithInteraction(provider) }
     }
+    /// Explicitly accepts a verified external generation while retaining all interrupted evidence.
+    /// The adapter durably saves that generation before releasing its recovery marker.
+    public func recoverClaudeKeepingCurrentLogin(_ id: UUID) async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard storageHealthy, !isStarting, !isPreparingForTermination,
+                  let adapter = adapters[.claude] else { return }
+            await operations.acquire(.claude); beginOperation()
+            guard !isPreparingForTermination, state.activeAccounts[.claude] == id,
+                  let account = state.accounts.first(where: { $0.id == id && $0.provider == .claude }) else {
+                await finishOperation(.claude); return
+            }
+            do {
+                try await flushPendingCredentials(.claude)
+                let imported = try await adapter.recoverKeepingCurrentLogin(account: account)
+                guard imported.account.id == id, imported.account.identity == account.identity,
+                      let index = state.accounts.firstIndex(where: { $0.id == id && $0.identity == account.identity }) else {
+                    throw AgentSwapError.storage("복구 중 계정 정보가 변경되었습니다. 현재 로그인을 다시 가져와 주세요.")
+                }
+                let latest = state.accounts[index]
+                var updated = imported.account
+                updated.nickname = latest.nickname; updated.createdAt = latest.createdAt
+                updated.automaticSwitchEligible = latest.automaticSwitchEligible
+                if updated.plan.isEmpty { updated.plan = latest.plan }
+                updated.authenticationState = .valid
+                state.accounts[index] = updated
+                discardRetainedCredential(id); clearPendingRefresh(id)
+                pendingSwitch.removeValue(forKey: .claude)
+                for record in state.accounts where record.provider == .claude {
+                    if var cache = state.usage[record.id],
+                       ["중단된 Claude 전환의 복원이 필요합니다.", "Claude 인증 복원을 완료한 뒤 갱신해 주세요."].contains(cache.error ?? "") {
+                        cache.retryAfter = nil
+                        state.usage[record.id] = cache
+                    }
+                }
+                message = "현재 Claude 로그인을 유지해 복구했습니다. 보류된 갱신 인증은 Keychain에 별도로 보관했습니다."
+                await persist()
+            } catch { message = error.localizedDescription }
+            compatibility[.claude] = await adapter.compatibility()
+            await finishOperation(.claude)
+            await refreshDue(force: true)
+        }
+    }
     private func recoverInterruptedSwitchWithInteraction(_ provider: Provider) async {
         guard !isPreparingForTermination, let adapter = adapters[provider] else { return }
         await operations.acquire(provider); beginOperation()
@@ -744,7 +880,7 @@ public final class AppModel {
         guard storageHealthy else { return }
         do { try await store.save(state) }
         catch {
-            storageHealthy = false; dismissClaudeCLIOnlySwitch()
+            storageHealthy = false
             message = "저장 실패로 계정 변경과 자동 전환을 중단했습니다. 앱을 다시 실행해 주세요: \(error.localizedDescription)"
         }
     }
@@ -763,14 +899,13 @@ public final class AppModel {
     }
     public func prepareForTermination() async -> Bool {
         guard !isPreparingForTermination else { return false }
-        dismissClaudeCLIOnlySwitch()
         isPreparingForTermination = true; beginOperation()
-        claudeDesktop.beginTermination()
+        claudeDesktopProfiles.beginTermination()
         let polling = scheduler
         stop()
         await cancelLogin()
         await polling?.value
-        await claudeDesktop.prepareForTermination()
+        await claudeDesktopProfiles.prepareForTermination()
         // Startup spans several provider queues while its busy count stays raised. Let it
         // finish before holding any queue it still needs for its next provider.
         await waitForOperations(limit: 1)
@@ -792,7 +927,7 @@ public final class AppModel {
         busyCount -= 1; isBusy = busyCount > 0; resumeOperationWaiters()
         if let failure {
             isPreparingForTermination = false
-            claudeDesktop.resumeAfterTerminationFailure()
+            claudeDesktopProfiles.resumeAfterTerminationFailure()
             message = "갱신된 인증과 복구 상태의 저장을 마치지 못해 종료를 보류했습니다. \(failure)"
             startScheduler()
             return false

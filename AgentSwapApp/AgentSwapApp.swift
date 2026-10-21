@@ -7,8 +7,10 @@ import SwiftUI
 struct AgentSwapApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AgentSwapApp.isDemo
-        ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible)
+        ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible,
+                           claudeRecoveryConflict: AgentSwapApp.isDemo && CommandLine.arguments.contains("--demo-recovery-conflict"))
         : AppModel.live()
+    @StateObject private var updater = AppUpdater(isDemo: AgentSwapApp.isDemo)
 
     fileprivate static var isDemo: Bool {
         CommandLine.arguments.contains("--demo") ||
@@ -48,13 +50,17 @@ struct AgentSwapApp: App {
                 .preferredColorScheme(AgentSwapApp.demoAppearance)
                 .frame(minWidth: 760, minHeight: 520)
                 .disabled(!appDelegate.canStartModel)
-                .task { await appDelegate.start(model: model) }
+                .task { await startApplication() }
         }
         .defaultSize(AgentSwapApp.initialWindowSize)
         .windowStyle(.automatic)
         .windowToolbarStyle(.unified)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("업데이트 확인…") { updater.checkForUpdates() }
+                    .disabled(!appDelegate.canStartModel || !updater.canCheckForUpdates)
+            }
             CommandGroup(after: .newItem) {
                 Button("모든 계정 새로고침") {
                     Task { await model.refreshAll() }
@@ -65,19 +71,24 @@ struct AgentSwapApp: App {
         }
 
         MenuBarExtra(needsAttention ? "AgentSwap · 확인 필요" : "AgentSwap", systemImage: needsAttention ? "exclamationmark.circle" : "arrow.triangle.swap") {
-            MenuBarView(model: model)
+            MenuBarView(model: model, updater: updater)
                 .preferredColorScheme(AgentSwapApp.demoAppearance)
                 .disabled(!appDelegate.canStartModel)
-                .task { await appDelegate.start(model: model) }
+                .task { await startApplication() }
         }
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView(model: model)
+            SettingsView(model: model, updater: updater)
                 .preferredColorScheme(AgentSwapApp.demoAppearance)
                 .disabled(!appDelegate.canStartModel)
-                .task { await appDelegate.start(model: model) }
+                .task { await startApplication() }
         }
+    }
+
+    private func startApplication() async {
+        await appDelegate.start(model: model)
+        if appDelegate.canStartModel { updater.start() }
     }
 }
 

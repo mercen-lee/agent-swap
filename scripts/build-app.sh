@@ -4,6 +4,29 @@ set -euo pipefail
 AGENTSWAP_ROOT="${0:A:h:h}"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
+# Keep a developer-machine signing choice out of source control. An explicitly
+# supplied environment value (including "-") always takes precedence.
+if [[ -n "${AGENTSWAP_SIGN_IDENTITY+x}" ]]; then
+  AGENTSWAP_RESOLVED_SIGN_IDENTITY="$AGENTSWAP_SIGN_IDENTITY"
+else
+  AGENTSWAP_LOCAL_SIGNING_IDENTITY="$AGENTSWAP_ROOT/.agentswap-signing-identity"
+  if [[ -e "$AGENTSWAP_LOCAL_SIGNING_IDENTITY" || -L "$AGENTSWAP_LOCAL_SIGNING_IDENTITY" ]]; then
+    if [[ ! -f "$AGENTSWAP_LOCAL_SIGNING_IDENTITY" || -L "$AGENTSWAP_LOCAL_SIGNING_IDENTITY" ]]; then
+      echo "Local signing identity must be a regular file: $AGENTSWAP_LOCAL_SIGNING_IDENTITY" >&2
+      exit 1
+    fi
+
+    AGENTSWAP_RESOLVED_SIGN_IDENTITY="$(<"$AGENTSWAP_LOCAL_SIGNING_IDENTITY")"
+    AGENTSWAP_LOCAL_SIGNING_LINES="$(/usr/bin/wc -l < "$AGENTSWAP_LOCAL_SIGNING_IDENTITY" | /usr/bin/tr -d ' ')"
+    if [[ ! "$AGENTSWAP_RESOLVED_SIGN_IDENTITY" =~ '^[0-9A-Fa-f]{40}$' ]] || (( AGENTSWAP_LOCAL_SIGNING_LINES > 1 )); then
+      echo "Local signing identity must contain exactly one 40-character certificate SHA-1: $AGENTSWAP_LOCAL_SIGNING_IDENTITY" >&2
+      exit 1
+    fi
+  else
+    AGENTSWAP_RESOLVED_SIGN_IDENTITY="-"
+  fi
+fi
+
 AGENTSWAP_PRODUCT="$AGENTSWAP_ROOT/build/DerivedData/Build/Products/Release/AgentSwap.app"
 AGENTSWAP_PRODUCT_EXECUTABLE="$AGENTSWAP_PRODUCT/Contents/MacOS/AgentSwap"
 while IFS= read -r AGENTSWAP_RUNNING_EXECUTABLE; do
@@ -19,8 +42,22 @@ xcodebuild \
   -configuration Release \
   -destination "platform=macOS,arch=$(uname -m)" \
   -derivedDataPath "$AGENTSWAP_ROOT/build/DerivedData" \
-  CODE_SIGN_IDENTITY="${AGENTSWAP_SIGN_IDENTITY:--}" \
+  CODE_SIGN_IDENTITY="-" \
+  CODE_SIGN_ENTITLEMENTS="$AGENTSWAP_ROOT/AgentSwapApp/AgentSwap-AdHoc.entitlements" \
+  CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   build
+
+if [[ "$AGENTSWAP_RESOLVED_SIGN_IDENTITY" != "-" ]]; then
+  /usr/bin/codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --preserve-metadata=entitlements \
+    --sign "$AGENTSWAP_RESOLVED_SIGN_IDENTITY" \
+    --timestamp=none \
+    "$AGENTSWAP_PRODUCT"
+fi
+/usr/bin/codesign --verify --deep --strict "$AGENTSWAP_PRODUCT"
 
 AGENTSWAP_INSTALLED_EXECUTABLE="$AGENTSWAP_ROOT/build/AgentSwap.app/Contents/MacOS/AgentSwap"
 while IFS= read -r AGENTSWAP_RUNNING_EXECUTABLE; do

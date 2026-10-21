@@ -169,6 +169,7 @@ public final class ClaudeDesktopProfileModel {
     @ObservationIgnored private let launcher: any ClaudeDesktopProfileLaunching
     @ObservationIgnored private let timeout: TimeInterval
     @ObservationIgnored private var operations = AccountOperationQueue()
+    @ObservationIgnored private var verifyRecoveryBoundary: @Sendable () async throws -> Void = {}
     @ObservationIgnored private var loaded = false
     @ObservationIgnored private var terminating = false
     @ObservationIgnored private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -185,7 +186,10 @@ public final class ClaudeDesktopProfileModel {
         model.profiles = profiles; model.loaded = true
         return model
     }
-    func connectOperationQueue(_ queue: AccountOperationQueue) { operations = queue }
+    func connectOperationQueue(_ queue: AccountOperationQueue, verifyRecoveryBoundary: @escaping @Sendable () async throws -> Void = {}) {
+        operations = queue
+        self.verifyRecoveryBoundary = verifyRecoveryBoundary
+    }
     public func load() async {
         await perform {
             let profiles = try await self.store.load(); try validateDesktopProfiles(profiles)
@@ -239,6 +243,8 @@ public final class ClaudeDesktopProfileModel {
     }
     private func open(profileID: UUID?) async {
         await perform {
+            try await self.verifyRecoveryBoundary()
+            try self.checkCanContinue()
             var directory: URL?
             if let profileID {
                 try await self.ensureLoaded()
@@ -279,6 +285,8 @@ public final class ClaudeDesktopProfileModel {
             guard final.reliable, final.desktop.isEmpty, final.related.isEmpty, tracked.isDisjoint(with: final.live) else {
                 throw AgentSwapError.storage("Claude가 다시 실행되어 프로필 전환을 보류했습니다.")
             }
+            try self.checkCanContinue()
+            try await self.verifyRecoveryBoundary()
             try self.checkCanContinue()
             try await self.launcher.launch(applicationURL: installation.url, configuration: .init(profileDirectory: directory))
             self.lastOpenedProfileID = profileID

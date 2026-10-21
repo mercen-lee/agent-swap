@@ -38,21 +38,29 @@ jobs:
       - name: Package Universal app
         id: package
         env:
-          AGENTSWAP_RELEASE_BUILD_NUMBER: ${{ github.run_number }}
-        run: ./scripts/package-release.sh "${AGENTSWAP_TAG#v}"
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo 'Configure the repository SPARKLE_PRIVATE_KEY secret before releasing.' >&2
+            exit 1
+          fi
+          ./scripts/package-release.sh "${AGENTSWAP_TAG#v}"
       - name: Verify release assets
         env:
           AGENTSWAP_ZIP: ${{ steps.package.outputs.zip_path }}
           AGENTSWAP_CHECKSUMS: ${{ steps.package.outputs.checksum_path }}
+          AGENTSWAP_APPCAST: ${{ steps.package.outputs.appcast_path }}
         run: |
           test -s "$AGENTSWAP_ZIP"
+          test -s "$AGENTSWAP_APPCAST"
           cd "$(dirname "$AGENTSWAP_CHECKSUMS")"
           shasum -a 256 -c SHA256SUMS
-      - name: Create draft prerelease
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           AGENTSWAP_ZIP: ${{ steps.package.outputs.zip_path }}
           AGENTSWAP_CHECKSUMS: ${{ steps.package.outputs.checksum_path }}
+          AGENTSWAP_APPCAST: ${{ steps.package.outputs.appcast_path }}
         shell: bash
         run: |
           set -euo pipefail
@@ -62,15 +70,21 @@ jobs:
             echo 'The remote tag changed after checkout; release creation stopped.' >&2
             exit 1
           fi
+          AGENTSWAP_IS_PRERELEASE=false
+          if [[ "$AGENTSWAP_TAG" == *-* ]]; then
+            AGENTSWAP_IS_PRERELEASE=true
+          fi
           cat > "$RUNNER_TEMP/agentswap-release-notes.md" <<'NOTES'
           AgentSwap development build for macOS 14 or later, with a Universal arm64/x86_64 app.
 
           Extract the ZIP to obtain AgentSwap.app. Verify it with the included SHA256SUMS.
+          AgentSwap checks GitHub Releases for updates. The signed appcast.xml and ZIP are hosted as release assets; no separate update server is used.
+          Versions before v0.1.0-beta.6 need a one-time manual download to enable the updater.
           The app uses ad-hoc signing; Developer ID signing and notarization are not included.
           The project remains in development. See README and docs/VALIDATION.md for known limitations.
           NOTES
-          gh release create "$AGENTSWAP_TAG" "$AGENTSWAP_ZIP" "$AGENTSWAP_CHECKSUMS" \
+          gh release create "$AGENTSWAP_TAG" "$AGENTSWAP_ZIP" "$AGENTSWAP_CHECKSUMS" "$AGENTSWAP_APPCAST" \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag --draft --prerelease --latest=false \
+            --verify-tag --draft --prerelease="$AGENTSWAP_IS_PRERELEASE" --latest=false \
             --title "AgentSwap $AGENTSWAP_TAG" \
             --notes-file "$RUNNER_TEMP/agentswap-release-notes.md"

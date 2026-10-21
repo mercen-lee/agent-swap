@@ -11,6 +11,14 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     }
     public func compatibility() async -> CompatibilityStatus { await authStore.compatibility() }
     public func recoverInterruptedSwitch() async throws { try await authStore.recoverInterruptedSwitch() }
+    public func recoverKeepingCurrentLogin(account: AccountRecord) async throws -> ImportedAccount {
+        try await authStore.recoverKeepingCurrentLogin(account: account) { credential in
+            try await self.identify(credential, forceProfile: true)
+        }
+    }
+    public func deletePreservedRecoveryCredentials(accountID: UUID) async throws {
+        try await authStore.deletePreservedRecoveryCredentials(accountID: accountID)
+    }
     public func importCurrent() async throws -> ImportedAccount { try await identify(await authStore.read()) }
     public func importCurrentIfPresent() async throws -> ImportedAccount? {
         guard let credential = try await authStore.readIfPresent() else { return nil }
@@ -21,8 +29,8 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     public func canOpenLoginPage() async -> Bool { await loginRunner.canOpenLoginPage() }
     public func openLoginPage() async throws { try await loginRunner.openLoginPage() }
     public func submitLoginCode(_ code: String) async throws { try await loginRunner.submitCode(code) }
-    private func identify(_ input: Credential) async throws -> ImportedAccount {
-        if let account = try? ProviderAccountParser.claude(input) { return account }
+    private func identify(_ input: Credential, forceProfile: Bool = false) async throws -> ImportedAccount {
+        if !forceProfile, let account = try? ProviderAccountParser.claude(input) { return account }
         var credential = input
         let request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/profile", token: credential.accessToken)
         let profile = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(request)))

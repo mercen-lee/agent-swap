@@ -11,6 +11,7 @@ struct AccountRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
+                ProviderBrandIcon(provider: account.provider, isSelected: isSelected)
                 Text(account.displayName).font(.headline).lineLimit(1)
                 if isActive {
                     Label("현재", systemImage: "checkmark.circle.fill")
@@ -60,6 +61,8 @@ struct AccountDetailView: View {
     let cache: UsageCache?
     let isActive: Bool
     let isPending: Bool
+    let needsSessionRecovery: Bool
+    let needsDesktopRecovery: Bool
     let compatibility: CompatibilityStatus?
     let isBusy: Bool
     let switchOperationBlockReason: String?
@@ -68,6 +71,11 @@ struct AccountDetailView: View {
     let onDelete: () -> Void
     let onEligibility: @MainActor @Sendable (Bool) -> Void
     let onRecover: () -> Void
+    let onRecoverKeepingCurrent: () -> Void
+    let onRecoverSessions: () -> Void
+    let onCaptureDesktop: () -> Void
+    let onSwitchDesktop: () -> Void
+    let onRecoverDesktop: () -> Void
     let onRecheckCompatibility: () -> Void
     let onAuthorizeSavedCredential: () -> Void
 
@@ -78,7 +86,13 @@ struct AccountDetailView: View {
     var body: some View {
         Form {
             Section(account.displayName) {
-                LabeledContent("제공자", value: account.provider.title)
+                LabeledContent("제공자") {
+                    Label {
+                        Text(account.provider.title)
+                    } icon: {
+                        ProviderBrandIcon(provider: account.provider)
+                    }
+                }
                 if !account.email.isEmpty { LabeledContent("이메일", value: account.email).textSelection(.enabled) }
                 LabeledContent("워크스페이스", value: account.workspaceName.isEmpty ? account.identity.workspaceID : account.workspaceName)
                     .textSelection(.enabled)
@@ -155,6 +169,10 @@ struct AccountDetailView: View {
                     }
                     if !compatibility.canWrite && compatibility.message.contains("복원") {
                         Button("중단된 전환 복구", systemImage: "arrow.uturn.backward", action: onRecover).disabled(isBusy)
+                        if account.provider == .claude && isActive {
+                            Button("현재 로그인 유지하고 복구", systemImage: "person.crop.circle.badge.checkmark", action: onRecoverKeepingCurrent)
+                                .disabled(isBusy)
+                        }
                     }
                 } else { Text("확인 중…").foregroundStyle(.secondary) }
                 if compatibility?.canWrite != true {
@@ -167,9 +185,39 @@ struct AccountDetailView: View {
                         Text("별도 CLI·IDE를 종료해주세요. 전환 및 재실행을 누르면 Codex를 정상 종료하고 인증을 교체한 뒤 데스크톱 앱을 다시 엽니다.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("Code 세션을 저장해야 하면 Claude를 정상 종료하고 목록을 보존한 뒤 다시 엽니다. 데스크톱 로그인은 별도로 유지됩니다.")
+                        Text("현재 인증 상태를 다시 확인한 뒤 전환하세요. 기존 대화 파일과 목록은 변경하지 않습니다.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                }
+            }
+            if account.provider == .claude {
+                Section("Desktop 연동") {
+                    Text("처음 한 번, 각 계정으로 Claude Desktop에 로그인한 뒤 이 계정의 로그인을 저장하세요.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("이 계정의 Desktop 로그인 저장", systemImage: "person.crop.circle.badge.checkmark", action: onCaptureDesktop)
+                        .disabled(isBusy)
+                    Button("Desktop과 CLI 함께 전환", systemImage: "arrow.triangle.swap", action: onSwitchDesktop)
+                        .disabled(isBusy || compatibility?.canWrite != true || account.authenticationState != .valid)
+                    Text("Desktop을 정상 종료한 뒤 선택한 로그인과 기존 Code 대화 목록을 적용하고 다시 엽니다. 대화 원본은 유지합니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if needsDesktopRecovery {
+                        Button("중단된 Desktop 전환 복구", systemImage: "arrow.uturn.backward", action: onRecoverDesktop)
+                            .disabled(isBusy)
+                    }
+                }
+                Section("대화 이어가기") {
+                    if needsSessionRecovery {
+                        Button("중단된 대화 목록 복구", systemImage: "arrow.uturn.backward", action: onRecoverSessions)
+                            .disabled(isBusy)
+                    }
+                    Text("기본 계정 전환은 Claude Code CLI 인증만 바꿉니다. Desktop까지 바꾸려면 위의 함께 전환을 사용하세요.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("터미널에서 대화 선택") {
+                        Text("claude --resume").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    Text("Desktop Code 탭에서 /resume로 CLI 대화를 선택할 수도 있습니다. 일반 계정 전환과 자동 전환은 Desktop 대화 목록을 변경하지 않습니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Link("공식 대화 재개 안내", destination: ClaudeConversationHelp.url)
                 }
             }
             Section {

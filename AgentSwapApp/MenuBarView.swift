@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     let model: AppModel
+    @ObservedObject var updater: AppUpdater
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -40,24 +41,28 @@ struct MenuBarView: View {
             }
             Divider()
             HStack {
-                Label("Claude Desktop", systemImage: "desktopcomputer")
+                Label {
+                    Text("Claude Desktop")
+                } icon: {
+                    ProviderBrandIcon(provider: .claude)
+                }
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Menu("프로필 열기") {
-                    Button("기존 Desktop 열기") { Task { await model.claudeDesktop.openDefault() } }
-                    ForEach(model.claudeDesktop.profiles) { profile in
-                        Button(profile.name) { Task { await model.claudeDesktop.openProfile(profile.id) } }
+                    Button("기존 Desktop 열기") { Task { await model.claudeDesktopProfiles.openDefault() } }
+                    ForEach(model.claudeDesktopProfiles.profiles) { profile in
+                        Button(profile.name) { Task { await model.claudeDesktopProfiles.openProfile(profile.id) } }
                     }
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .disabled(model.claudeDesktop.isBusy)
+                .disabled(model.claudeDesktopProfiles.isBusy)
             }
-            if model.claudeDesktop.profiles.isEmpty {
+            if model.claudeDesktopProfiles.profiles.isEmpty {
                 Text("대시보드의 Claude Desktop에서 프로필을 추가하세요.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if let message = model.claudeDesktop.message {
+            if let message = model.claudeDesktopProfiles.message {
                 Text(message).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(3)
             }
@@ -69,7 +74,18 @@ struct MenuBarView: View {
                 Text(message).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ClaudeCLIOnlySwitchAction(model: model)
+            if model.claudeSessionRecoveryRequired {
+                Button("중단된 대화 목록 복구", systemImage: "arrow.uturn.backward") {
+                    Task { await model.recoverInterruptedClaudeSessions() }
+                }
+                .disabled(model.isBusy)
+            }
+            if model.claudeDesktopRecoveryRequired {
+                Button("중단된 Desktop 전환 복구", systemImage: "arrow.uturn.backward") {
+                    Task { await model.recoverClaudeDesktopSwitch() }
+                }
+                .disabled(model.isBusy)
+            }
             Divider()
             HStack {
                 Button("대시보드 열기", systemImage: "rectangle.on.rectangle") {
@@ -78,6 +94,8 @@ struct MenuBarView: View {
                 }
                 Spacer()
                 Menu {
+                    Button("업데이트 확인…") { updater.checkForUpdates() }
+                        .disabled(!updater.canCheckForUpdates)
                     Button("설정…") {
                         openSettings()
                         NSApplication.shared.activate()
@@ -102,8 +120,12 @@ struct MenuBarView: View {
         let active = accounts.first { $0.id == model.state.activeAccounts[provider] }
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(provider.title, systemImage: provider == .claude ? "sun.max" : "terminal")
-                    .font(.subheadline.weight(.semibold))
+                Label {
+                    Text(provider.title)
+                } icon: {
+                    ProviderBrandIcon(provider: provider)
+                }
+                .font(.subheadline.weight(.semibold))
                 Spacer()
                 if !accounts.isEmpty {
                     Menu("전환") {
@@ -150,7 +172,7 @@ struct MenuBarView: View {
                 let presentation = switchPresentation(for: pending)
                 Label("\(pending.displayName) 전환 대기", systemImage: "clock")
                     .font(.caption).foregroundStyle(.orange)
-                Text(provider == .codex ? "별도 CLI·IDE를 종료한 뒤 진행해주세요." : "Code 세션을 저장해야 하면 Claude를 정상 종료하고 목록을 보존한 뒤 다시 엽니다.")
+                Text(provider == .codex ? "별도 CLI·IDE를 종료한 뒤 진행해주세요." : "현재 인증 상태를 다시 확인한 뒤 전환하세요. 기존 대화 파일과 목록은 변경하지 않습니다.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button(presentation.title) {
                     Task { await model.switchAccount(pendingID, relaunch: true) }

@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A00000000000000000000090 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000094 /* Sparkle */; };
+		A00000000000000000000092 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000093 /* AppUpdater.swift */; };
 		A00000000000000000000019 /* ClaudeDesktopProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000B /* ClaudeDesktopProfilesView.swift */; };
 		A00000000000000000000011 /* AgentSwapApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000001 /* AgentSwapApp.swift */; };
 		A00000000000000000000012 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* DashboardView.swift */; };
@@ -18,6 +20,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A00000000000000000000093 /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
 		A0000000000000000000000B /* ClaudeDesktopProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeDesktopProfilesView.swift; sourceTree = "<group>"; };
 		A00000000000000000000001 /* AgentSwapApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSwapApp.swift; sourceTree = "<group>"; };
 		A00000000000000000000002 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
@@ -32,8 +35,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A00000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000018 /* AgentSwapCore in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000018 /* AgentSwapCore in Frameworks */, A00000000000000000000090 /* Sparkle in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
+
 
 /* Begin PBXGroup section */
 		A00000000000000000000030 = {
@@ -43,7 +47,7 @@
 		};
 		A00000000000000000000031 /* AgentSwapApp */ = {
 			isa = PBXGroup;
-			children = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A0000000000000000000000B, A00000000000000000000007, A00000000000000000000008,);
+			children = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A0000000000000000000000B, A00000000000000000000093, A00000000000000000000007, A00000000000000000000008,);
 			path = AgentSwapApp;
 			sourceTree = "<group>";
 		};
@@ -58,7 +62,7 @@
 			buildRules = ();
 			dependencies = ();
 			name = AgentSwap;
-			packageProductDependencies = (A00000000000000000000060 /* AgentSwapCore */,);
+			packageProductDependencies = (A00000000000000000000060 /* AgentSwapCore */, A00000000000000000000094 /* Sparkle */,);
 			productName = AgentSwap;
 			productReference = A00000000000000000000009 /* AgentSwap.app */;
 			productType = "com.apple.product-type.application";
@@ -75,7 +79,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (ko, en, Base,);
 			mainGroup = A00000000000000000000030;
-			packageReferences = (A00000000000000000000061 /* XCLocalSwiftPackageReference AgentSwapCore */,);
+			packageReferences = (A00000000000000000000061 /* XCLocalSwiftPackageReference AgentSwapCore */, A00000000000000000000095 /* XCRemoteSwiftPackageReference Sparkle */,);
 			productRefGroup = A00000000000000000000032 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -88,7 +92,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A00000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000019,); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000011, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000019, A00000000000000000000092,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
@@ -153,8 +157,13 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A00000000000000000000094 /* Sparkle */ = {isa = XCSwiftPackageProductDependency; package = A00000000000000000000095 /* XCRemoteSwiftPackageReference Sparkle */; productName = Sparkle; };
 		A00000000000000000000060 /* AgentSwapCore */ = {isa = XCSwiftPackageProductDependency; productName = AgentSwapCore; };
 /* End XCSwiftPackageProductDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A00000000000000000000095 /* XCRemoteSwiftPackageReference Sparkle */ = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/sparkle-project/Sparkle"; requirement = {kind = exactVersion; version = 2.10.0; }; };
+/* End XCRemoteSwiftPackageReference section */
 	};
 	rootObject = A00000000000000000000050 /* Project object */;
 }

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SettingsView: View {
     let model: AppModel
+    @ObservedObject var updater: AppUpdater
     @Environment(\.scenePhase) private var scenePhase
     @State private var loginStatus = SMAppService.mainApp.status
     @State private var loginError: String?
@@ -12,9 +13,10 @@ struct SettingsView: View {
     private var appVersionTitle: String {
         guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "AgentSwap" }
+        let displayVersion = Bundle.main.object(forInfoDictionaryKey: "AgentSwapReleaseTag") as? String ?? version
         guard let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
-              !build.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "AgentSwap \(version)" }
-        return "AgentSwap \(version) · 빌드 \(build)"
+              !build.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "AgentSwap \(displayVersion)" }
+        return "AgentSwap \(displayVersion) · 빌드 \(build)"
     }
 
     var body: some View {
@@ -70,6 +72,25 @@ struct SettingsView: View {
                 }
                 Text("요청 한도에 도달하면 제공자의 재시도 시각을 따릅니다. 조회에 실패해도 마지막 정상 값을 유지합니다.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("업데이트") {
+                Toggle("새 버전 자동 확인", isOn: $updater.automaticallyChecksForUpdates)
+                    .disabled(!updater.isAvailable)
+                Toggle("업데이트 자동 다운로드", isOn: $updater.automaticallyDownloadsUpdates)
+                    .disabled(!updater.isAvailable || !updater.automaticallyChecksForUpdates)
+                Button("업데이트 확인…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+                if let date = updater.lastUpdateCheckDate {
+                    LabeledContent("마지막 확인") {
+                        Text(date, format: .dateTime.month().day().hour().minute())
+                    }
+                }
+                if let status = updater.statusMessage {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("GitHub Releases에서 새 버전을 확인하고 서명을 검증합니다. 설치·재실행은 업데이트 안내에서 진행하세요.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("보관") {
                 LabeledContent("인증", value: "앱 전용 macOS Keychain")
@@ -133,7 +154,7 @@ struct SettingsView: View {
                         Text("확인 중…").foregroundStyle(.secondary)
                     }
                     if provider == .claude {
-                        Text("인증과 oauthAccount를 함께 교체하고, MCP·플러그인 인증과 계정 외 설정을 보존합니다. 실행 중인 Claude Code에는 반영이 지연될 수 있습니다.")
+                        Text("기본 전환은 CLI 인증과 계정 정보만 교체합니다. 계정 상세에서 Desktop 로그인을 저장하면 Desktop과 CLI를 함께 전환할 수 있습니다. MCP·플러그인 인증과 계정 외 설정, 대화 원본은 보존합니다.")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("file·Keychain·auto 저장소를 지원합니다. 실행 중인 데스크톱·CLI·IDE·데몬이 종료됐는지 확인한 뒤 인증을 교체합니다. ephemeral·별도 secrets·알 수 없는 형식은 자동 변경하지 않습니다.")
