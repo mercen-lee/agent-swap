@@ -78,6 +78,19 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# A release must preserve its Keychain identity across executable changes. Build
+# intermediates may be ad-hoc, but public archives must use the pinned dedicated
+# release certificate; never fall back to an ad-hoc or a developer's identity.
+AGENTSWAP_RELEASE_CERTIFICATE="$AGENTSWAP_ROOT/scripts/signing/release-certificate.cer"
+AGENTSWAP_RELEASE_SIGNING_KEYCHAIN="${AGENTSWAP_RELEASE_SIGNING_KEYCHAIN:-}"
+[[ -n "$AGENTSWAP_RELEASE_SIGNING_KEYCHAIN" ]] || fail "AGENTSWAP_RELEASE_SIGNING_KEYCHAIN must name a dedicated keychain containing the pinned release identity."
+[[ -f "$AGENTSWAP_RELEASE_SIGNING_KEYCHAIN" && ! -L "$AGENTSWAP_RELEASE_SIGNING_KEYCHAIN" ]] || fail "The dedicated release keychain must be a regular file."
+AGENTSWAP_RELEASE_SIGNING_HELPER="$AGENTSWAP_RELEASE_WORK_DIR/release-signing"
+/usr/bin/xcrun swiftc -suppress-warnings "$AGENTSWAP_ROOT/scripts/release-signing.swift" -o "$AGENTSWAP_RELEASE_SIGNING_HELPER"
+AGENTSWAP_RELEASE_CERTIFICATE_SHA1="$("$AGENTSWAP_RELEASE_SIGNING_HELPER" preflight "$AGENTSWAP_RELEASE_CERTIFICATE" "$AGENTSWAP_RELEASE_SIGNING_KEYCHAIN")"
+[[ "$AGENTSWAP_RELEASE_CERTIFICATE_SHA1" =~ '^[0-9A-F]{40}$' ]] || fail "Cannot determine the pinned release signing identity."
+AGENTSWAP_RELEASE_REQUIREMENT="=designated => identifier \"net.mercen.agentswap\" and certificate leaf = H\"$AGENTSWAP_RELEASE_CERTIFICATE_SHA1\""
+
 AGENTSWAP_SPARKLE_TOOLS="$AGENTSWAP_RELEASE_WORK_DIR/Sparkle"
 "$AGENTSWAP_ROOT/scripts/fetch-sparkle-tools.sh" "$AGENTSWAP_SPARKLE_TOOLS"
 if [[ -z "$AGENTSWAP_SPARKLE_PRIVATE_KEY" ]]; then
@@ -157,7 +170,15 @@ while IFS= read -r -d '' AGENTSWAP_FILE; do
     fi
 done < <(/usr/bin/find "$AGENTSWAP_RELEASE_APP" -type f -print0)
 TZ=UTC /usr/bin/find "$AGENTSWAP_RELEASE_APP" -exec /usr/bin/touch -h -t "$AGENTSWAP_RELEASE_TOUCH_TIME" {} +
+# Sign the outer app after metadata and nested-code assembly are final. Preserve
+# Xcode's entitlements and the existing Sparkle nested signatures. --deep signing
+# would apply the app's requirement to unrelated nested bundle identifiers.
+/usr/bin/codesign --force --options runtime --preserve-metadata=entitlements \
+    --sign "$AGENTSWAP_RELEASE_CERTIFICATE_SHA1" --keychain "$AGENTSWAP_RELEASE_SIGNING_KEYCHAIN" \
+    --identifier net.mercen.agentswap --requirements "$AGENTSWAP_RELEASE_REQUIREMENT" \
+    --timestamp=none "$AGENTSWAP_RELEASE_APP"
 /usr/bin/codesign --verify --deep --strict "$AGENTSWAP_RELEASE_APP"
+"$AGENTSWAP_RELEASE_SIGNING_HELPER" verify "$AGENTSWAP_RELEASE_APP" "$AGENTSWAP_RELEASE_CERTIFICATE"
 /usr/bin/codesign --display --entitlements :- "$AGENTSWAP_RELEASE_APP" 2>/dev/null | /usr/bin/python3 -c '
 import plistlib, sys
 entitlements = plistlib.loads(sys.stdin.buffer.read())
@@ -240,4 +261,4 @@ fi
 print -r -- "Packaged: build/releases/$AGENTSWAP_RELEASE_VERSION/$AGENTSWAP_ZIP_NAME"
 print -r -- "Checksums: build/releases/$AGENTSWAP_RELEASE_VERSION/SHA256SUMS"
 print -r -- "Signed update feed: build/releases/$AGENTSWAP_RELEASE_VERSION/appcast.xml"
-print -r -- 'The app is ad-hoc signed and has not been notarized.'
+print -r -- 'The app uses the pinned dedicated signing certificate and has not been notarized.'

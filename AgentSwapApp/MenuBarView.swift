@@ -5,6 +5,8 @@ import SwiftUI
 struct MenuBarView: View {
     let model: AppModel
     @ObservedObject var updater: AppUpdater
+    let isAuthorizingSavedAccounts: Bool
+    let onAuthorizeSavedAccounts: () -> Void
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -96,6 +98,8 @@ struct MenuBarView: View {
                 Menu {
                     Button("업데이트 확인…") { updater.checkForUpdates() }
                         .disabled(!updater.canCheckForUpdates)
+                    Button("저장된 계정 접근 허용…", action: onAuthorizeSavedAccounts)
+                        .disabled(model.isBusy || isAuthorizingSavedAccounts || model.state.accounts.isEmpty)
                     Button("설정…") {
                         openSettings()
                         NSApplication.shared.activate()

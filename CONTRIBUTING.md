@@ -33,7 +33,7 @@ open build/AgentSwap.app --args --demo
 
 [릴리스 워크플로](.github/workflows/release.yml)는 원격 저장소에 버전 태그를 push할 때 실행합니다. 태그는 `vMAJOR.MINOR.PATCH` 형식이며 `v0.1.0-beta.1`처럼 SemVer prerelease 식별자를 붙일 수 있습니다. `+build` 메타데이터는 받지 않습니다. 태그 생성과 push는 릴리스 담당자의 별도 작업이며, 워크플로가 태그를 자동으로 만들지 않습니다.
 
-태그의 소스로 Core 테스트를 실행하고, macOS 14를 최소 대상으로 하는 `arm64`·`x86_64` Universal Release 앱을 ad-hoc 서명해 ZIP으로 묶습니다. Apple 인증서나 공증 자격 증명은 사용하지 않습니다. 앱의 `CFBundleShortVersionString`에는 태그의 숫자 기본 버전, `CFBundleVersion`에는 소스 커밋의 Unix 시각을 사용합니다. 로컬과 CI가 같은 기준을 사용하며, 다음 릴리스의 빌드 번호는 이전보다 커야 합니다. prerelease 식별자를 포함한 전체 버전은 태그·ZIP 이름·`AgentSwapReleaseTag`·업데이트 화면에 유지합니다.
+태그의 소스로 Core 테스트를 실행하고, macOS 14를 최소 대상으로 하는 `arm64`·`x86_64` Universal Release 앱을 고정된 앱 전용 인증서로 서명해 ZIP으로 묶습니다. 개인 Apple Development 인증서나 공증 자격 증명은 사용하지 않습니다. 앱의 `CFBundleShortVersionString`에는 태그의 숫자 기본 버전, `CFBundleVersion`에는 소스 커밋의 Unix 시각을 사용합니다. 로컬과 CI가 같은 기준을 사용하며, 다음 릴리스의 빌드 번호는 이전보다 커야 합니다. prerelease 식별자를 포함한 전체 버전은 태그·ZIP 이름·`AgentSwapReleaseTag`·업데이트 화면에 유지합니다.
 
 테스트·패키징·서명·체크섬 확인이 성공하면 ZIP, 서명된 `appcast.xml`, 두 파일의 `SHA256SUMS`를 첨부한 **draft prerelease**를 생성합니다. 담당자는 GitHub의 Releases에서 릴리스 노트, 알려진 제한과 첨부 파일을 검토한 뒤 공개 여부를 결정합니다. 기존 같은 태그의 초안이나 첨부 파일은 덮어쓰지 않으므로 재실행으로 교체하지 말고 새 버전을 준비하세요. 초안 생성이나 Universal 빌드는 v1 완료·실계정 호환성 검증을 뜻하지 않습니다.
 
@@ -61,11 +61,19 @@ open build/AgentSwap.app --args --demo
 
 공개 키만 `AgentSwapApp/Info.plist`의 `SUPublicEDKey`에 넣습니다. 개인 키는 macOS 로그인 Keychain의 Sparkle 서비스와 `net.mercen.agentswap` 계정에 보관합니다. 로컬 패키징은 이 키를 직접 사용합니다. GitHub Actions에는 같은 개인 키를 저장소의 `SPARKLE_PRIVATE_KEY` encrypted secret으로 등록합니다. 키를 출력·로그·명령 인자·Git에 넣지 않습니다. 임시 파일로 옮겨야 한다면 접근 제한된 임시 폴더에서만 내보내고 secret 등록 직후 삭제하세요.
 
-CI는 개인 키를 Sparkle 도구의 표준 입력으로 전달합니다. 패키징은 공개 키와 개인 키가 일치하는 ZIP 서명, 피드 서명, 정확한 URL·버전·파일 크기·최소 OS를 확인하고, 서명 검증에 실패하면 산출물을 공개하지 않습니다. 앱은 피드와 ZIP 서명을 확인하며 압축 해제 전 검증을 요구합니다. 서명 키를 잃으면 이 ad-hoc 앱의 기존 설치에 새 키를 안전하게 자동 배포할 수 없으므로 키 보관을 유지하세요. [Sparkle 서명 문서](https://sparkle-project.org/documentation/)
+CI는 개인 키를 Sparkle 도구의 표준 입력으로 전달합니다. 패키징은 공개 키와 개인 키가 일치하는 ZIP 서명, 피드 서명, 정확한 URL·버전·파일 크기·최소 OS를 확인하고, 서명 검증에 실패하면 산출물을 공개하지 않습니다. 앱은 피드와 ZIP 서명을 확인하며 압축 해제 전 검증을 요구합니다. 현재 배포는 Developer ID 서명을 사용하지 않으므로 Sparkle 키를 잃으면 기존 설치에 새 업데이트 키를 안전하게 자동 배포할 수 없습니다. 기존 키를 유지하세요. [Sparkle 서명 문서](https://sparkle-project.org/documentation/)
 
 현재 패키징은 Developer ID 서명·Apple 공증·DMG를 제공하지 않습니다. `codesign` 검증과 SHA-256 일치는 앱·파일의 무결성 확인이며 Gatekeeper의 개발자 신원·공증 검증과 다릅니다. 다운로드한 개발용 앱은 macOS에서 경고하거나 차단될 수 있습니다. [Apple의 Gatekeeper 안내](https://support.apple.com/ko-kr/102445)
 
-Hardened Runtime은 유지합니다. ad-hoc 호스트에서 별도로 서명된 Sparkle 프레임워크를 불러오려면 library validation 예외가 필요하므로, 현재 공개용 ad-hoc 패키지와 로컬 개발 빌드는 `AgentSwap-AdHoc.entitlements`를 적용합니다. 공개 패키지는 기본 디버깅 entitlement 주입을 끕니다. 향후 Developer ID 배포 파이프라인을 만들 때는 포함된 코드를 같은 identity로 서명하고 library validation 예외를 제거해야 합니다. 이 예외는 Apple 공증을 대신하지 않습니다. [Sparkle 설정 안내](https://sparkle-project.org/documentation/)
+Hardened Runtime은 유지합니다. 별도 identity의 Sparkle 프레임워크를 불러오기 위해 현재 self-signed 공개 패키지와 로컬 개발 빌드는 `AgentSwap-AdHoc.entitlements`의 library validation 예외를 적용합니다. 공개 패키지는 기본 디버깅 entitlement 주입을 끕니다. 향후 Developer ID 배포 파이프라인을 만들 때는 포함된 코드를 같은 identity로 서명하고 library validation 예외를 제거해야 합니다. 이 예외는 Apple 공증을 대신하지 않습니다. [Sparkle 설정 안내](https://sparkle-project.org/documentation/)
+
+### Keychain 앱 식별을 유지하는 릴리즈 서명
+
+beta.8부터 `scripts/signing/release-certificate.cer`의 공개 인증서를 고정합니다. 앱의 designated requirement는 `net.mercen.agentswap` 식별자와 이 인증서의 hash를 함께 요구합니다. 인증서를 새로 만들거나 ad-hoc으로 대체하면 기존 Keychain 승인을 유지할 수 없으므로, 인증서·개인 키는 계속 재사용해야 합니다. 공개 DER만 Git에 포함하며 개인 키·P12·암호는 포함하지 않습니다. self-signed 서명은 Apple Developer ID나 공증이 아닙니다. [Apple 코드 서명 정책](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)
+
+CI는 encrypted repository secrets `AGENTSWAP_SIGNING_P12_BASE64`·`AGENTSWAP_SIGNING_P12_PASSWORD`를 `prepare-release-signing.py`에 전달합니다. 준비 프로그램이 환경에서 비밀 값을 제거한 뒤 표준 입력으로만 임시 Keychain에 가져옵니다. 기본 Keychain·검색 목록·시스템 신뢰 설정은 바꾸지 않으며 `always()` 정리 단계에서 임시 Keychain을 삭제합니다. 개인 Apple Development 인증서를 내보내 이 용도로 사용하지 않습니다.
+
+로컬 패키징은 고정 인증서의 개인 키가 있는 Keychain의 경로를 `AGENTSWAP_RELEASE_SIGNING_KEYCHAIN`으로 지정합니다. 패키징은 인증서 원문·개인 키 존재·서명 후 DR을 확인하고, ad-hoc이나 다른 인증서를 거부합니다. `python3 scripts/test-release-signing.py`는 독립된 합성 키로 코드가 다른 두 앱의 DR 연속성, 잘못된 인증서·ad-hoc 거부, CI 준비·반복 정리와 검색 목록 불변을 확인합니다.
 
 ## Git에 포함할 자료
 

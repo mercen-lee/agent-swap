@@ -26,6 +26,24 @@ private actor DesktopManagerProcesses: ClaudeDesktopConversationProcessControlli
     func setVersion(_ value: String) { version = value }
 }
 
+private final class DesktopManagerMutationProcesses: ClaudeDesktopMutationProcessChecking, @unchecked Sendable {
+    struct Check: Equatable {
+        let applicationURL: URL
+        let tracked: Set<ClaudeDesktopConversationProcessIdentity>
+    }
+    private let lock = NSLock()
+    private var recorded: [Check] = []
+    private var deniedCalls: Set<Int> = []
+    var checks: [Check] { lock.withLock { recorded } }
+    func deny(onCalls: Set<Int>) { lock.withLock { deniedCalls = onCalls } }
+    func verifyStopped(applicationURL: URL, tracked: Set<ClaudeDesktopConversationProcessIdentity>) throws {
+        try lock.withLock {
+            recorded.append(.init(applicationURL: applicationURL, tracked: tracked))
+            if deniedCalls.contains(recorded.count) { throw AgentSwapError.storage("fixture synchronous process fence denied") }
+        }
+    }
+}
+
 private final class DesktopManagerLoginVerifier: ClaudeDesktopLoginVerifying, @unchecked Sendable {
     private let lock = NSLock()
     private var failure: Error?
@@ -73,6 +91,7 @@ private final class DesktopManagerFaultFiles: ClaudeDesktopAuthFileAccess, @unch
 struct ClaudeDesktopAccountManagerTests {
     private struct Fixture {
         let home: URL; let source: AccountRecord; let target: AccountRecord; let keychain = DesktopManagerKeychain(); let processes: DesktopManagerProcesses; let loginVerifier = DesktopManagerLoginVerifier()
+        let mutationProcesses = DesktopManagerMutationProcesses()
         var config: URL { home.appendingPathComponent("Library/Application Support/Claude/config.json") }
         var cookie: URL { home.appendingPathComponent("Library/Application Support/Claude/Cookies") }
         init() throws {
@@ -96,7 +115,8 @@ struct ClaudeDesktopAccountManagerTests {
         func manager(files: (any ClaudeDesktopAuthFileAccess)? = nil, loginVerifier: (any ClaudeDesktopLoginVerifying)? = nil) -> ClaudeDesktopAccountManager {
             .init(home: home, keychain: keychain, processes: processes,
                   files: files ?? SecureClaudeDesktopAuthFileAccess(home: home),
-                  loginVerifier: loginVerifier ?? self.loginVerifier)
+                  loginVerifier: loginVerifier ?? self.loginVerifier,
+                  mutationProcesses: mutationProcesses)
         }
     }
 
@@ -297,6 +317,53 @@ struct ClaudeDesktopAccountManagerTests {
         await #expect(throws: AgentSwapError.self) { try await manager.finish(transactionID: id, cliApplied: true) }
         #expect(try Data(contentsOf: f.config) == configBefore)
         #expect(try Data(contentsOf: f.cookie) == cookieBefore)
+    }
+
+    @Test("각 인증 쓰기와 완료 직전은 합성 동기 프로세스 경계를 확인한다")
+    func synchronousFenceChecksEveryMutationAndCompletion() async throws {
+        let f = try Fixture(); defer { f.cleanup() }; let manager = f.manager()
+        try f.writeDesktop(f.source, token: "source", cookie: Data("source-cookie".utf8)); try await manager.captureCurrent(for: f.source)
+        try f.writeDesktop(f.target, token: "target", cookie: Data("target-cookie".utf8)); try await manager.captureCurrent(for: f.target)
+        try f.writeDesktop(f.source, token: "source", cookie: Data("source-cookie".utf8))
+        await f.processes.setRunning(true)
+        let id = try await manager.prepareSwitch(target: f.target, registered: [f.source, f.target], currentCLI: f.source.identity)
+        #expect(f.mutationProcesses.checks.isEmpty)
+        _ = try await manager.finish(transactionID: id, cliApplied: true)
+        let expected = DesktopManagerMutationProcesses.Check(applicationURL: f.home.appendingPathComponent("Claude.app"),
+                                                             tracked: [.init(pid: 42, startedAt: 1)])
+        #expect(f.mutationProcesses.checks == Array(repeating: expected, count: 3))
+        #expect(try Data(contentsOf: f.cookie) == Data("target-cookie".utf8))
+    }
+
+    @Test("두 번째 쓰기 전 동기 종료 확인 실패는 다음 쓰기를 막고 정확한 원본을 복구한다")
+    func synchronousFenceDenialRestoresBeforeImages() async throws {
+        let f = try Fixture(); defer { f.cleanup() }; let manager = f.manager()
+        try f.writeDesktop(f.source, token: "source", cookie: Data("source-cookie".utf8)); try await manager.captureCurrent(for: f.source)
+        try f.writeDesktop(f.target, token: "target", cookie: Data("target-cookie".utf8)); try await manager.captureCurrent(for: f.target)
+        try f.writeDesktop(f.source, token: "source", cookie: Data("source-cookie".utf8))
+        let configBefore = try Data(contentsOf: f.config), cookieBefore = try Data(contentsOf: f.cookie)
+        let id = try await manager.prepareSwitch(target: f.target, registered: [f.source, f.target], currentCLI: f.source.identity)
+        f.mutationProcesses.deny(onCalls: [2])
+        await #expect(throws: AgentSwapError.self) { try await manager.finish(transactionID: id, cliApplied: true) }
+        #expect(f.mutationProcesses.checks.count == 3)
+        #expect(try Data(contentsOf: f.config) == configBefore)
+        #expect(try Data(contentsOf: f.cookie) == cookieBefore)
+    }
+
+    @Test("복구 시 동기 종료 확인도 실패하면 추가 인증 쓰기 없이 복구 기록을 보존한다")
+    func synchronousFenceDenialDuringRollbackPreservesJournal() async throws {
+        let f = try Fixture(); defer { f.cleanup() }; let manager = f.manager()
+        try f.writeDesktop(f.source, token: "source", cookie: Data("source-cookie".utf8)); try await manager.captureCurrent(for: f.source)
+        try f.writeDesktop(f.target, token: "target", cookie: Data("target-cookie".utf8)); try await manager.captureCurrent(for: f.target)
+        try f.writeDesktop(f.source, token: "source", cookie: Data("source-cookie".utf8))
+        let configBefore = try Data(contentsOf: f.config), cookieBefore = try Data(contentsOf: f.cookie)
+        let id = try await manager.prepareSwitch(target: f.target, registered: [f.source, f.target], currentCLI: f.source.identity)
+        f.mutationProcesses.deny(onCalls: [2, 3])
+        await #expect(throws: AgentSwapError.self) { try await manager.finish(transactionID: id, cliApplied: true) }
+        #expect(f.mutationProcesses.checks.count == 3)
+        #expect(try Data(contentsOf: f.config) != configBefore)
+        #expect(try Data(contentsOf: f.cookie) == cookieBefore)
+        #expect(try f.keychain.read(service: "net.mercen.agentswap.recovery", account: "claude-desktop-account-switch") != nil)
     }
 
     @Test("지원하지 않는 Desktop 버전은 종료하거나 인증을 저장하지 않는다")

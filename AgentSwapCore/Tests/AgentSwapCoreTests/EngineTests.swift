@@ -109,6 +109,7 @@ struct EngineTests {
         await adapter.setError(.network("오프라인")); await model.refreshAll()
         #expect(model.state.usage[id]?.snapshot == old)
         #expect(model.state.usage[id]?.error == "오프라인")
+        #expect(model.state.usage[id]?.retryReason == .transientFailure)
         #expect(model.state.usage[id]?.snapshot?.minimumRemaining == 70)
     }
     @Test func retryAfterBlocksForcedFetch() async {
@@ -118,6 +119,7 @@ struct EngineTests {
         let attempted = model.state.usage[id]?.attemptedAt
         await model.refreshAll()
         #expect(model.state.usage[id]?.retryAfter == retry)
+        #expect(model.state.usage[id]?.retryReason == .serverRateLimit)
         #expect(model.state.usage[id]?.attemptedAt == attempted)
     }
     @Test func rotatedTokenSavedBeforeFailingFetch() async {

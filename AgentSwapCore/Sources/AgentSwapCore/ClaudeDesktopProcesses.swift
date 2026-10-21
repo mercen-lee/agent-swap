@@ -33,6 +33,49 @@ public protocol ClaudeDesktopConversationProcessControlling: Sendable {
     func relaunch(at applicationURL: URL) async throws
 }
 
+/// Auth transactions cannot suspend between their process fence and a file mutation.
+/// Tests inject this boundary separately from the asynchronous Desktop controller.
+public protocol ClaudeDesktopMutationProcessChecking: Sendable {
+    func verifyStopped(applicationURL: URL, tracked: Set<ClaudeDesktopConversationProcessIdentity>) throws
+}
+
+public struct SystemClaudeDesktopMutationProcessChecker: ClaudeDesktopMutationProcessChecking {
+    public init() {}
+
+    public func verifyStopped(applicationURL: URL, tracked: Set<ClaudeDesktopConversationProcessIdentity>) throws {
+        for expected in tracked {
+            var info = proc_bsdinfo()
+            let size = MemoryLayout<proc_bsdinfo>.size
+            let found = withUnsafeMutablePointer(to: &info) { proc_pidinfo(expected.pid, PROC_PIDTBSDINFO, 0, $0, Int32(size)) }
+            if found == size {
+                // A zombie has exited and cannot consume credentials or write files, even
+                // while its parent has not reaped the PID and kill(pid, 0) still succeeds.
+                guard let current = ClaudeDesktopProcessTracking.identity(for: expected.pid, info: info) else { continue }
+                guard current.startedAt != expected.startedAt else { throw AgentSwapError.storage("Claude 관련 프로세스가 남아 인증 저장을 중단했습니다.") }
+            } else if !ClaudeDesktopProcessTracking.hasExited(pid: expected.pid) {
+                throw AgentSwapError.storage("Claude 관련 프로세스 종료를 확인하지 못했습니다.")
+            }
+        }
+        let byteCount = proc_listpids(UInt32(PROC_UID_ONLY), geteuid(), nil, 0)
+        guard byteCount > 0 else { throw AgentSwapError.storage("Claude 데스크톱 프로세스를 다시 확인하지 못했습니다.") }
+        var pids = [Int32](repeating: 0, count: max(1, Int(byteCount) / MemoryLayout<Int32>.size + 64))
+        let result = pids.withUnsafeMutableBytes { proc_listpids(UInt32(PROC_UID_ONLY), geteuid(), $0.baseAddress, Int32($0.count)) }
+        guard result > 0, Int(result) / MemoryLayout<Int32>.size < pids.count else { throw AgentSwapError.storage("Claude 데스크톱 프로세스를 다시 확인하지 못했습니다.") }
+        for pid in pids.prefix(Int(result) / MemoryLayout<Int32>.size) where pid > 0 {
+            var bytes = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            let count = proc_pidpath(pid, &bytes, UInt32(bytes.count))
+            if count <= 0 {
+                // ESRCH alone can also mean hidden access. Require a positive zombie
+                // state when libproc cannot inspect an unreaped PID.
+                if ClaudeDesktopProcessTracking.hasExited(pid: pid) { continue }
+                throw AgentSwapError.storage("Claude 데스크톱 프로세스 경로를 확인하지 못했습니다.")
+            }
+            let path = String(decoding: bytes.prefix(Int(count)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            if path.hasPrefix(applicationURL.path + "/") { throw AgentSwapError.storage("Claude 데스크톱이 다시 실행되어 인증 저장을 중단했습니다.") }
+        }
+    }
+}
+
 /// Reconciles a prior Claude process generation with the current process inventory.
 /// A cached PID is only retained when its start time proves it is the same process;
 /// this keeps an orphaned helper visible across a retry without mistaking PID reuse

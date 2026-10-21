@@ -59,7 +59,7 @@ private actor SavedAccessVault: SecretStore {
         mutations += 1; credentials[accountID] = credential
     }
     func delete(accountID: UUID) { mutations += 1; credentials.removeValue(forKey: accountID) }
-    func fail(_ value: SavedAccessFailure) { failure = value }
+    func fail(_ value: SavedAccessFailure?) { failure = value }
     func resetObservations() { reads.removeAll(); mutations = 0 }
 }
 
@@ -121,7 +121,8 @@ struct CoreSavedCredentialAccessTests {
         let selected: AccountRecord
     }
 
-    private func fixture(provider: Provider = .claude, active: Bool = true, healthy: Bool = false) async -> Fixture {
+    private func fixture(provider: Provider = .claude, active: Bool = true, healthy: Bool = false,
+                         retryReason: UsageRetryReason? = nil) async -> Fixture {
         let source = AccountRecord(identity: .init(provider: provider, userID: "source", workspaceID: "workspace"), automaticSwitchEligible: true)
         let selected = AccountRecord(identity: .init(provider: provider, userID: "selected", workspaceID: "workspace"),
                                      nickname: "Saved account", automaticSwitchEligible: true, authenticationState: healthy ? .valid : .expired)
@@ -130,7 +131,8 @@ struct CoreSavedCredentialAccessTests {
         let now = Date()
         for (account, percent) in [(source, 95.0), (selected, 10.0)] {
             state.usage[account.id] = .init(snapshot: .init(fetchedAt: now, windows: [.init(id: "common", title: "Fixture", usedPercent: percent)]),
-                                           attemptedAt: now, error: healthy ? nil : "Fixture cached permission error", retryAfter: now.addingTimeInterval(120))
+                                           attemptedAt: now, error: healthy ? nil : "Fixture cached permission error",
+                                           retryAfter: now.addingTimeInterval(120), retryReason: retryReason)
         }
         state.lastSwitch[provider] = now.addingTimeInterval(-600)
         let events = SavedAccessEvents(), adapter = SavedAccessProvider(provider: provider, events: events)
@@ -142,25 +144,104 @@ struct CoreSavedCredentialAccessTests {
         return .init(model: model, provider: adapter, vault: vault, store: store, events: events, source: source, selected: selected)
     }
 
-    @Test("Only the chosen saved credential is read interactively", arguments: Provider.allCases)
+    @Test("Only the chosen saved credential is read interactively and unknown legacy retry delays remain", arguments: Provider.allCases)
     func selectedReadOnly(provider: Provider) async {
         let fixture = await fixture(provider: provider), before = fixture.model.state
         let outerMode = KeychainInteraction.mode
-        await fixture.model.authorizeSavedCredential(fixture.selected.id)
+        let approved = await fixture.model.authorizeSavedCredential(fixture.selected.id)
+        #expect(approved)
         #expect(await fixture.vault.reads == [.init(id: fixture.selected.id, interactive: true)])
         #expect(await fixture.vault.mutations == 0)
         #expect(await fixture.provider.calls.isEmpty)
         #expect(await fixture.store.writes == 0)
         #expect(fixture.model.state == before)
         #expect(fixture.model.state.usage[fixture.selected.id]?.error != nil)
-        #expect(fixture.model.message?.contains("새로고침") == true)
+        #expect(fixture.model.message?.contains("기존 재시도 대기는 유지") == true)
         #expect(!fixture.model.isBusy)
         #expect(KeychainInteraction.mode == outerMode)
     }
 
+    @Test("Approval clears only the selected account's local retry delay without querying or switching", arguments: Provider.allCases)
+    func approvalClearsSelectedLocalDelay(provider: Provider) async {
+        let fixture = await fixture(provider: provider, retryReason: .localFailure)
+        var settings = fixture.model.state.settings; settings.automation[provider]?.enabled = true
+        await fixture.model.updateSettings(settings)
+        await fixture.store.resetObservations()
+        let before = fixture.model.state
+
+        await fixture.model.authorizeSavedCredential(fixture.selected.id)
+
+        var expected = before
+        expected.usage[fixture.selected.id]?.retryAfter = nil
+        expected.usage[fixture.selected.id]?.retryReason = nil
+        expected.usage[fixture.selected.id]?.attemptedAt = nil
+        #expect(fixture.model.state == expected)
+        #expect(await fixture.vault.reads == [.init(id: fixture.selected.id, interactive: true)])
+        #expect(await fixture.vault.mutations == 0)
+        #expect(await fixture.provider.calls.isEmpty)
+        #expect(await fixture.store.writes == 1)
+        #expect(await fixture.store.load() == expected)
+        #expect(fixture.model.message?.contains("재시도 대기를 해제") == true)
+        #expect(fixture.model.pendingSwitch.isEmpty)
+    }
+
+    @Test("Approval never clears server or unrelated transient retry delays", arguments: [UsageRetryReason.serverRateLimit, .transientFailure])
+    func approvalPreservesUnrelatedDelay(reason: UsageRetryReason) async {
+        let fixture = await fixture(retryReason: reason), before = fixture.model.state
+        await fixture.model.authorizeSavedCredential(fixture.selected.id)
+        #expect(fixture.model.state == before)
+        #expect(await fixture.provider.calls.isEmpty)
+        #expect(await fixture.vault.mutations == 0)
+        #expect(await fixture.store.writes == 0)
+        if reason == .serverRateLimit {
+            #expect(fixture.model.message?.contains("서버가 지정한 재시도 시각") == true)
+        } else {
+            #expect(fixture.model.message?.contains("기존 재시도 대기는 유지") == true)
+        }
+    }
+
+    @Test("A genuine local access failure becomes eligible for the next normal poll after approval")
+    func localFailureRetriesWithoutWaitingForPollInterval() async throws {
+        let fixture = await fixture()
+        await fixture.vault.fail(.denied)
+        await fixture.model.refreshDue(force: true, now: Date().addingTimeInterval(121))
+        #expect(fixture.model.state.usage[fixture.selected.id]?.retryReason == .localFailure)
+        #expect(fixture.model.state.usage[fixture.selected.id]?.retryAfter != nil)
+        let snapshot = fixture.model.state.usage[fixture.selected.id]?.snapshot
+        await fixture.vault.fail(nil)
+        await fixture.provider.resetObservations(); await fixture.vault.resetObservations()
+
+        await fixture.model.authorizeSavedCredential(fixture.selected.id)
+
+        #expect(await fixture.provider.calls.isEmpty)
+        #expect(fixture.model.state.usage[fixture.selected.id]?.snapshot == snapshot)
+        #expect(fixture.model.state.usage[fixture.selected.id]?.error == "Fixture permission denied")
+        // A regular scheduler poll must be eligible immediately; no forced refresh is needed.
+        await fixture.model.refreshDue()
+        #expect(await fixture.provider.calls.filter { $0 == "usage" }.count == 1)
+        let refreshed = try #require(fixture.model.state.usage[fixture.selected.id])
+        #expect(refreshed.error == nil)
+        #expect(refreshed.retryAfter == nil)
+        #expect(refreshed.retryReason == nil)
+        #expect(refreshed.attemptedAt != nil)
+    }
+
+    @Test("Legacy persisted cache without a retry reason decodes without reclassifying its delay")
+    func legacyCacheKeepsUnknownDelay() throws {
+        let deadline = Date(timeIntervalSince1970: 2_000_000_000)
+        let oldCache = UsageCache(attemptedAt: deadline.addingTimeInterval(-120), error: "Fixture cached error", retryAfter: deadline)
+        let encoded = try JSONEncoder().encode(oldCache)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        #expect(object["retryReason"] == nil)
+        let decoded = try JSONDecoder().decode(UsageCache.self, from: encoded)
+        #expect(decoded == oldCache)
+        #expect(decoded.retryAfter == deadline)
+        #expect(decoded.retryReason == nil)
+    }
+
     @Test("Missing or denied saved auth preserves all account and pending state", arguments: SavedAccessFailure.allCases)
     fileprivate func failedAccessDoesNotChangeState(failure: SavedAccessFailure) async throws {
-        let fixture = await fixture(provider: .codex)
+        let fixture = await fixture(provider: .codex, retryReason: .localFailure)
         // Establish a readable source for the switch itself. Startup's permission-denied
         // fixture must not authorize applying auth without a current source backup.
         let sourceCredential = try #require(try await fixture.vault.load(accountID: fixture.source.id))
@@ -170,7 +251,8 @@ struct CoreSavedCredentialAccessTests {
         #expect(pending[.codex] == fixture.selected.id)
         await fixture.provider.resetObservations(); await fixture.vault.resetObservations(); await fixture.store.resetObservations()
         await fixture.vault.fail(failure)
-        await fixture.model.authorizeSavedCredential(fixture.selected.id)
+        let approved = await fixture.model.authorizeSavedCredential(fixture.selected.id)
+        #expect(!approved)
         #expect(await fixture.vault.reads == [.init(id: fixture.selected.id, interactive: true)])
         #expect(await fixture.vault.mutations == 0)
         #expect(await fixture.provider.calls.isEmpty)
@@ -211,7 +293,7 @@ struct CoreSavedCredentialAccessTests {
         await Task.yield()
         #expect(await fixture.vault.reads.filter(\.interactive).isEmpty)
         await pause.release()
-        await approving.value; await refreshing.value
+        #expect(await approving.value); await refreshing.value
         let events = await fixture.events.values
         let finished = try #require(events.firstIndex(of: "fetch-end"))
         let approved = try #require(events.firstIndex(of: "interactive-read"))

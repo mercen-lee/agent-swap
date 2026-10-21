@@ -102,6 +102,7 @@ public actor ClaudeDesktopAccountManager: ClaudeDesktopAccountManaging {
     private let home: URL
     private let keychain: any KeychainAccess
     private let processes: any ClaudeDesktopConversationProcessControlling
+    private let mutationProcesses: any ClaudeDesktopMutationProcessChecking
     private let files: any ClaudeDesktopAuthFileAccess
     private let loginVerifier: any ClaudeDesktopLoginVerifying
     private let appURL: URL?
@@ -112,10 +113,12 @@ public actor ClaudeDesktopAccountManager: ClaudeDesktopAccountManaging {
                 processes: any ClaudeDesktopConversationProcessControlling = SystemClaudeDesktopConversationProcessController(),
                 files: (any ClaudeDesktopAuthFileAccess)? = nil,
                 loginVerifier: any ClaudeDesktopLoginVerifying = SystemClaudeDesktopLoginVerifier(),
-                appURL: URL? = nil) {
+                appURL: URL? = nil,
+                mutationProcesses: any ClaudeDesktopMutationProcessChecking = SystemClaudeDesktopMutationProcessChecker()) {
         self.home = home.standardizedFileURL; self.keychain = keychain; self.processes = processes
         self.files = files ?? SecureClaudeDesktopAuthFileAccess(home: home)
         self.loginVerifier = loginVerifier; self.appURL = appURL
+        self.mutationProcesses = mutationProcesses
     }
 
     public func captureCurrent(for account: AccountRecord) async throws {
@@ -512,7 +515,7 @@ public actor ClaudeDesktopAccountManager: ClaudeDesktopAccountManaging {
                     throw AgentSwapError.storage("대상 Code 대화 목록이 전환 중 변경되었습니다.")
                 }
             }, verifyLock: {
-                try self.ensureStoppedSynchronously(applicationURL: installation.url, tracked: transaction.tracked)
+                try self.mutationProcesses.verifyStopped(applicationURL: installation.url, tracked: self.processIdentities(transaction))
             })
         return try await completeApplied(transaction, installation: installation)
     }
@@ -662,40 +665,6 @@ public actor ClaudeDesktopAccountManager: ClaudeDesktopAccountManaging {
         throw AgentSwapError.storage("Claude 데스크톱이 완전히 종료된 뒤 다시 시도해 주세요.")
     }
 
-    /// AuthTransaction is synchronous by design.  Fence every individual file mutation against
-    /// a newly launched Desktop process without reading its arguments or environment.
-    private func ensureStoppedSynchronously(applicationURL: URL, tracked: [DesktopTrackedProcess]) throws {
-        for expected in tracked {
-            var info = proc_bsdinfo()
-            let size = MemoryLayout<proc_bsdinfo>.size
-            let found = withUnsafeMutablePointer(to: &info) { proc_pidinfo(expected.pid, PROC_PIDTBSDINFO, 0, $0, Int32(size)) }
-            if found == size {
-                // A zombie has exited and cannot consume credentials or write files, even
-                // while its parent has not reaped the PID and kill(pid, 0) still succeeds.
-                guard let current = ClaudeDesktopProcessTracking.identity(for: expected.pid, info: info) else { continue }
-                guard current.startedAt != expected.startedAt else { throw AgentSwapError.storage("Claude 관련 프로세스가 남아 인증 저장을 중단했습니다.") }
-            } else if !ClaudeDesktopProcessTracking.hasExited(pid: expected.pid) {
-                throw AgentSwapError.storage("Claude 관련 프로세스 종료를 확인하지 못했습니다.")
-            }
-        }
-        let byteCount = proc_listpids(UInt32(PROC_UID_ONLY), geteuid(), nil, 0)
-        guard byteCount > 0 else { throw AgentSwapError.storage("Claude 데스크톱 프로세스를 다시 확인하지 못했습니다.") }
-        var pids = [Int32](repeating: 0, count: max(1, Int(byteCount) / MemoryLayout<Int32>.size + 64))
-        let result = pids.withUnsafeMutableBytes { proc_listpids(UInt32(PROC_UID_ONLY), geteuid(), $0.baseAddress, Int32($0.count)) }
-        guard result > 0, Int(result) / MemoryLayout<Int32>.size < pids.count else { throw AgentSwapError.storage("Claude 데스크톱 프로세스를 다시 확인하지 못했습니다.") }
-        for pid in pids.prefix(Int(result) / MemoryLayout<Int32>.size) where pid > 0 {
-            var bytes = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-            let count = proc_pidpath(pid, &bytes, UInt32(bytes.count))
-            if count <= 0 {
-                // ESRCH alone can also mean hidden access. Require a positive zombie
-                // state when libproc cannot inspect an unreaped PID.
-                if ClaudeDesktopProcessTracking.hasExited(pid: pid) { continue }
-                throw AgentSwapError.storage("Claude 데스크톱 프로세스 경로를 확인하지 못했습니다.")
-            }
-            let path = String(decoding: bytes.prefix(Int(count)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            if path.hasPrefix(applicationURL.path + "/") { throw AgentSwapError.storage("Claude 데스크톱이 다시 실행되어 인증 저장을 중단했습니다.") }
-        }
-    }
     private func begin() throws {
         try Task.checkCancellation()
         guard !operating else { throw AgentSwapError.storage("다른 Claude 데스크톱 로그인 작업이 진행 중입니다.") }; operating = true

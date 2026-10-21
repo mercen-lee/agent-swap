@@ -137,25 +137,46 @@ public final class AppModel {
             await self.finishOperation(provider)
         }
     }
-    public func authorizeSavedCredential(_ id: UUID) async {
-        guard !isStarting, !isPreparingForTermination, let account = state.accounts.first(where: { $0.id == id }) else { return }
+    @discardableResult
+    public func authorizeSavedCredential(_ id: UUID) async -> Bool {
+        guard !isStarting, !isPreparingForTermination, let account = state.accounts.first(where: { $0.id == id }) else { return false }
         await operations.acquire(account.provider)
         beginOperation()
         guard !isPreparingForTermination, state.accounts.contains(where: { $0.id == id && $0.identity == account.identity }) else {
             await finishOperation(account.provider)
-            return
+            return false
         }
+        var approved = false
         do {
             try Task.checkCancellation()
             let exists = try await KeychainInteraction.$mode.withValue(.interactive) {
                 try await secrets.load(accountID: id) != nil
             }
             guard exists else { throw AgentSwapError.authentication("저장된 인증이 없습니다. 이 계정에 다시 로그인해 주세요.") }
-            message = "저장된 인증에 접근할 수 있습니다. 새로고침하거나 다음 조회를 기다려 주세요."
+            approved = true
+            if !storageHealthy {
+                message = "저장된 인증에 접근할 수 있습니다. 저장 데이터 오류로 조회는 중단된 상태입니다. 앱을 다시 실행해 주세요."
+            } else if var cache = state.usage[id], cache.retryReason == .localFailure {
+                // Access approval concerns only this vault entry. It must not forgive
+                // a provider's rate limit or infer the cause of a legacy retry delay.
+                cache.retryAfter = nil; cache.retryReason = nil; cache.attemptedAt = nil
+                state.usage[id] = cache
+                message = "저장된 인증에 접근할 수 있습니다. 이 계정의 저장소 오류 재시도 대기를 해제했습니다. 새로고침하거나 다음 조회를 기다려 주세요."
+                await persist()
+            } else if let cache = state.usage[id], let retry = cache.retryAfter, retry > Date() {
+                if cache.retryReason == .serverRateLimit {
+                    message = "저장된 인증에 접근할 수 있습니다. 서버가 지정한 재시도 시각까지 조회를 기다립니다."
+                } else {
+                    message = "저장된 인증에 접근할 수 있습니다. 기존 재시도 대기는 유지합니다. 재시도 시각 이후 다시 조회해 주세요."
+                }
+            } else {
+                message = "저장된 인증에 접근할 수 있습니다. 새로고침하거나 다음 조회를 기다려 주세요."
+            }
         } catch is CancellationError {
             message = "저장된 인증 접근 확인을 취소했습니다."
         } catch { message = error.localizedDescription }
         await finishOperation(account.provider)
+        return approved
     }
     public func refreshDue(force: Bool = false, now: Date = Date()) async {
         await KeychainInteraction.$mode.withValue(.noninteractive) { await refreshDueWithCurrentInteraction(force: force, now: now) }
@@ -253,7 +274,7 @@ public final class AppModel {
                     snapshot = try await adapter.fetchUsage(credential, account: account)
                 } else { throw error }
             }
-            snapshot.fetchedAt = Date(); cache.snapshot = snapshot; cache.error = nil; cache.retryAfter = nil
+            snapshot.fetchedAt = Date(); cache.snapshot = snapshot; cache.error = nil; cache.retryAfter = nil; cache.retryReason = nil
             if let index = state.accounts.firstIndex(where: { $0.id == id }) {
                 state.accounts[index].authenticationState = .valid
                 if let plan = snapshot.plan { state.accounts[index].plan = plan }
@@ -262,12 +283,14 @@ public final class AppModel {
             cache.error = error.localizedDescription
             if let typed = error as? AgentSwapError {
                 switch typed {
-                case .rateLimited(let retry): cache.retryAfter = retry
+                case .rateLimited(let retry): cache.retryAfter = retry; cache.retryReason = .serverRateLimit
                 case .authentication:
+                    cache.retryAfter = nil; cache.retryReason = nil
                     if let index = state.accounts.firstIndex(where: { $0.id == id }) { state.accounts[index].authenticationState = .needsLogin }
-                default: cache.retryAfter = now.addingTimeInterval(60)
+                case .storage: cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .localFailure
+                default: cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .transientFailure
                 }
-            } else { cache.retryAfter = now.addingTimeInterval(60) }
+            } else { cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .transientFailure }
         }
         if state.accounts.contains(where: { $0.id == id }) { state.usage[id] = cache }
         // A successful retry or failed native update can change write compatibility. Do not
@@ -854,6 +877,7 @@ public final class AppModel {
                     if var cache = state.usage[record.id],
                        ["중단된 Claude 전환의 복원이 필요합니다.", "Claude 인증 복원을 완료한 뒤 갱신해 주세요."].contains(cache.error ?? "") {
                         cache.retryAfter = nil
+                        cache.retryReason = nil
                         state.usage[record.id] = cache
                     }
                 }

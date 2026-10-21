@@ -11,6 +11,7 @@ struct AgentSwapApp: App {
                            claudeRecoveryConflict: AgentSwapApp.isDemo && CommandLine.arguments.contains("--demo-recovery-conflict"))
         : AppModel.live()
     @StateObject private var updater = AppUpdater(isDemo: AgentSwapApp.isDemo)
+    @State private var isAuthorizingSavedAccounts = false
 
     fileprivate static var isDemo: Bool {
         CommandLine.arguments.contains("--demo") ||
@@ -60,6 +61,8 @@ struct AgentSwapApp: App {
             CommandGroup(after: .appInfo) {
                 Button("업데이트 확인…") { updater.checkForUpdates() }
                     .disabled(!appDelegate.canStartModel || !updater.canCheckForUpdates)
+                Button("저장된 계정 접근 허용…") { Task { await authorizeSavedAccounts() } }
+                    .disabled(!appDelegate.canStartModel || model.isBusy || isAuthorizingSavedAccounts || model.state.accounts.isEmpty)
             }
             CommandGroup(after: .newItem) {
                 Button("모든 계정 새로고침") {
@@ -71,7 +74,9 @@ struct AgentSwapApp: App {
         }
 
         MenuBarExtra(needsAttention ? "AgentSwap · 확인 필요" : "AgentSwap", systemImage: needsAttention ? "exclamationmark.circle" : "arrow.triangle.swap") {
-            MenuBarView(model: model, updater: updater)
+            MenuBarView(model: model, updater: updater,
+                        isAuthorizingSavedAccounts: isAuthorizingSavedAccounts,
+                        onAuthorizeSavedAccounts: { Task { await authorizeSavedAccounts() } })
                 .preferredColorScheme(AgentSwapApp.demoAppearance)
                 .disabled(!appDelegate.canStartModel)
                 .task { await startApplication() }
@@ -89,6 +94,17 @@ struct AgentSwapApp: App {
     private func startApplication() async {
         await appDelegate.start(model: model)
         if appDelegate.canStartModel { updater.start() }
+    }
+
+    @MainActor
+    private func authorizeSavedAccounts() async {
+        guard appDelegate.canStartModel, !model.isBusy, !isAuthorizingSavedAccounts else { return }
+        isAuthorizingSavedAccounts = true
+        defer { isAuthorizingSavedAccounts = false }
+        let accounts = model.state.accounts.map(\.id)
+        for id in accounts {
+            guard !Task.isCancelled, await model.authorizeSavedCredential(id) else { break }
+        }
     }
 }
 

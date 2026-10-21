@@ -69,13 +69,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         return !commonWindows.isEmpty && values.count == commonWindows.count ? values.min() : nil
     }
 }
+/// The reason for a retry delay is separate from its user-facing error. Older caches
+/// have no reason, so their delay cannot safely be treated as a local access failure.
+public enum UsageRetryReason: String, Codable, Sendable {
+    case serverRateLimit, localFailure, transientFailure
+}
 public struct UsageCache: Codable, Equatable, Sendable {
     public var snapshot: UsageSnapshot?
     public var attemptedAt: Date?
     public var error: String?
     public var retryAfter: Date?
-    public init(snapshot: UsageSnapshot? = nil, attemptedAt: Date? = nil, error: String? = nil, retryAfter: Date? = nil) {
+    public var retryReason: UsageRetryReason?
+    public init(snapshot: UsageSnapshot? = nil, attemptedAt: Date? = nil, error: String? = nil, retryAfter: Date? = nil,
+                retryReason: UsageRetryReason? = nil) {
         self.snapshot = snapshot; self.attemptedAt = attemptedAt; self.error = error; self.retryAfter = retryAfter
+        self.retryReason = retryReason
     }
 }
 public struct Credential: Codable, Equatable, Sendable {

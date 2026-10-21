@@ -246,7 +246,7 @@ struct PendingCredentialPersistenceTests {
         #expect(fixture.model.state.activeAccounts[.codex] == fixture.selected.id)
     }
 
-    @Test("Read-only permission approval does not flush or exchange a retained successor")
+    @Test("Permission approval clears only the local retry delay without flushing or exchanging a retained successor")
     func approvalRemainsReadOnly() async {
         let fixture = await fixture()
         await fixture.model.refreshDue(force: true, now: fixture.now.addingTimeInterval(121))
@@ -255,7 +255,11 @@ struct PendingCredentialPersistenceTests {
         await fixture.model.authorizeSavedCredential(fixture.selected.id)
         #expect(await fixture.vault.savedTokens.isEmpty)
         #expect(await fixture.vault.loadedInteractions == [true])
-        #expect(fixture.model.state == before)
+        var expected = before
+        expected.usage[fixture.selected.id]?.retryAfter = nil
+        expected.usage[fixture.selected.id]?.retryReason = nil
+        expected.usage[fixture.selected.id]?.attemptedAt = nil
+        #expect(fixture.model.state == expected)
         #expect(await fixture.adapter.refreshTokens == ["fixture-original"])
         await fixture.vault.allowSuccessor()
         await fixture.model.refreshDue(force: true, now: fixture.now.addingTimeInterval(182))

@@ -67,7 +67,7 @@ open build/AgentSwap.app --args --demo
 
 ## 개발용 초안 릴리스
 
-릴리스 담당자가 `v0.1.0` 또는 `v0.1.0-beta.1` 형태의 버전 태그를 원격 저장소에 push하면 [릴리스 워크플로](.github/workflows/release.yml)가 Core 테스트와 Universal Release 패키징을 실행합니다. `arm64`·`x86_64`를 포함한 ad-hoc 서명 앱 ZIP·`SHA256SUMS`·Sparkle `appcast.xml`이 GitHub 릴리스 초안에 첨부됩니다. 태그에 사전 버전 접미사가 있으면 prerelease로 표시하며, 업데이트 ZIP은 별도의 EdDSA 키로 서명합니다.
+릴리스 담당자가 `v0.1.0` 또는 `v0.1.0-beta.1` 형태의 버전 태그를 원격 저장소에 push하면 [릴리스 워크플로](.github/workflows/release.yml)가 Core 테스트와 Universal Release 패키징을 실행합니다. `arm64`·`x86_64`를 포함한 앱 ZIP·`SHA256SUMS`·Sparkle `appcast.xml`이 GitHub 릴리스 초안에 첨부됩니다. beta.8부터 앱은 고정된 전용 인증서로 서명하며, 인증서가 없거나 일치하지 않으면 릴리스를 중단합니다. 태그에 사전 버전 접미사가 있으면 prerelease로 표시하며, 업데이트 ZIP은 별도의 EdDSA 키로 서명합니다.
 
 워크플로는 태그를 만들거나 릴리스를 자동 공개하지 않습니다. 담당자가 GitHub의 Releases에서 초안·릴리스 노트·산출물을 검토한 뒤 공개 여부를 결정합니다. 태그의 숫자 기본 버전은 앱 버전에, 소스 커밋의 Unix 시각은 빌드 번호에 사용합니다.
 
@@ -79,7 +79,7 @@ open build/AgentSwap.app --args --demo
 
 결과는 `build/releases/0.1.0/AgentSwap-0.1.0-universal.zip`과 같은 폴더의 `SHA256SUMS`·서명된 `appcast.xml`입니다. 기존 버전 폴더나 같은 태그의 릴리스 초안은 덮어쓰지 않습니다. 자세한 버전 규칙과 검토 절차는 [기여 안내](CONTRIBUTING.md)를 참고하세요.
 
-이 ZIP은 macOS 14 이상을 대상으로 하는 개발용 앱이며 Developer ID 서명·Apple 공증·DMG를 포함하지 않습니다. ad-hoc 서명 검증은 Gatekeeper의 확인된 개발자·공증 검증을 대신하지 않으므로, 다운로드한 앱을 열 때 macOS가 경고하거나 실행을 차단할 수 있습니다. [Apple의 Gatekeeper 안내](https://support.apple.com/ko-kr/102445)
+이 ZIP은 macOS 14 이상을 대상으로 하는 개발용 앱입니다. 전용 self-signed 인증서는 업데이트 사이의 Keychain 앱 식별을 유지하기 위한 것이며 Developer ID 서명·Apple 공증·DMG를 포함하지 않습니다. Gatekeeper의 확인된 개발자·공증 검증을 대신하지 않으므로, 다운로드한 앱을 열 때 macOS가 경고하거나 실행을 차단할 수 있습니다. [Apple의 Gatekeeper 안내](https://support.apple.com/ko-kr/102445)
 
 ## 앱 업데이트
 
@@ -125,7 +125,7 @@ Desktop 프로필은 CLI 계정과 별도로 등록하며 CLI OAuth를 Desktop �
 | 독립 Desktop 프로필 이름·UUID | `~/Library/Application Support/AgentSwap/ClaudeDesktopProfiles/profiles.json` |
 | 독립 Desktop 프로필의 로그인·대화 | 같은 경로의 UUID별 private 폴더에서 공식 Desktop이 관리 |
 
-macOS Keychain 접근 요청은 사용자가 승인합니다. 제공자의 인증과 앱에 저장한 인증은 별도 항목이며, ad-hoc 빌드의 서명이 바뀌면 다시 승인을 요청할 수 있습니다. 계정 상세의 **저장된 인증 접근 허용**은 선택한 앱 인증만 읽습니다. 승인 뒤 새로고침하거나 다음 조회를 기다리세요.
+macOS Keychain 접근 요청은 사용자가 승인합니다. 제공자의 인증과 앱에 저장한 인증은 별도 항목입니다. beta.7 이하의 ad-hoc 앱에서 beta.8의 고정 서명으로 옮길 때는 기존 항목의 승인이 한 번 필요할 수 있습니다. **AgentSwap 메뉴 → 저장된 계정 접근 허용…**으로 저장된 계정의 접근을 차례로 확인하거나, 계정 상세의 **저장된 인증 접근 허용**으로 한 항목만 확인하세요. macOS 승인 창은 사용자가 직접 처리합니다. 실패·취소하면 일괄 확인을 멈춥니다. 이 동작은 저장된 인증을 읽으며 재로그인·계정 전환은 하지 않습니다. 승인 성공 후 해당 계정의 저장소 오류 대기는 해제하고, 서버의 요청 한도 대기는 유지합니다. 이후 새로고침하거나 다음 조회를 기다리세요.
 
 토큰과 인증 코드는 메타데이터나 로그에 기록하지 않습니다. Claude의 인증과 `oauthAccount`를 함께 바꾸고 MCP·플러그인 인증과 계정 외 설정을 보존합니다. Codex의 설정·세션·대화 기록도 유지합니다. 알 수 없는 저장 형식에서는 쓰기를 중단합니다.
 
