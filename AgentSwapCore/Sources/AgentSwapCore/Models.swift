@@ -142,10 +142,10 @@ public struct PersistedState: Codable, Equatable, Sendable {
     public init() {}
 }
 public enum AgentSwapError: Error, LocalizedError, Sendable, Equatable {
-    case unsupported(String), authentication(String), storage(String), network(String), rateLimited(Date), cancelled
+    case unsupported(String), authentication(String), storage(String), nativeIdentityUnverified(String), network(String), rateLimited(Date), cancelled
     public var errorDescription: String? {
         switch self {
-        case .unsupported(let s), .authentication(let s), .storage(let s), .network(let s): s
+        case .unsupported(let s), .authentication(let s), .storage(let s), .nativeIdentityUnverified(let s), .network(let s): s
         case .rateLimited: "요청 한도에 도달했습니다. 재시도 시각까지 기다립니다."
         case .cancelled: "로그인이 취소되었습니다."
         }

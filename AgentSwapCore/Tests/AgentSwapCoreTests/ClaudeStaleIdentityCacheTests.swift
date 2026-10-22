@@ -104,7 +104,13 @@ struct ClaudeStaleIdentityCacheTests {
         defer { fixture.cleanup() }
         await fixture.transport.failProfile(status: status)
         let adapter = fixture.adapter
-        await #expect(throws: AgentSwapError.self) { try await adapter.importCurrent() }
+        do {
+            _ = try await adapter.importCurrent()
+            Issue.record("A rejected profile must not identify a native account")
+        } catch let error as AgentSwapError {
+            if case .nativeIdentityUnverified = error { #expect(status == 401) }
+            else { #expect(status != 401) }
+        }
         await #expect(throws: AgentSwapError.self) { try await adapter.importCurrent() }
         #expect(await fixture.transport.paths == ["/api/oauth/profile", "/api/oauth/profile"])
         #expect(try Data(contentsOf: fixture.store.configURL) == fixture.configData)
@@ -138,7 +144,7 @@ struct ClaudeStaleIdentityCacheTests {
             _ = try await adapter.importCurrent()
             Issue.record("An expired legacy grant must remain unverified")
         } catch let error as AgentSwapError {
-            guard case .storage = error else { Issue.record("Identity verification failure is not evidence of logout"); return }
+            guard case .nativeIdentityUnverified = error else { Issue.record("Identity verification failure is not evidence of logout"); return }
         }
         #expect(await fixture.transport.paths == ["/api/oauth/profile"])
     }

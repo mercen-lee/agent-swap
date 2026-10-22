@@ -49,15 +49,9 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         rememberVerifiedMetadata(metadata, grant: VerifiedGrant(credential))
     }
     private func identifyNative(_ credential: Credential) async throws -> ImportedAccount {
-        do { return try await identify(credential) }
-        catch let error as AgentSwapError {
-            if case .authentication = error {
-                throw AgentSwapError.storage("현재 Claude 로그인 계정을 확인하지 못해 갱신을 보류했습니다. 공식 앱의 로그인을 확인한 뒤 다시 조회해 주세요.")
-            }
-            throw error
-        }
+        try await identify(credential, nativeContext: true)
     }
-    private func identify(_ input: Credential, forceProfile: Bool = false) async throws -> ImportedAccount {
+    private func identify(_ input: Credential, forceProfile: Bool = false, nativeContext: Bool = false) async throws -> ImportedAccount {
         try validateCredentialTokens(input)
         var credential = input
         if !forceProfile, let metadata = verifiedMetadata[VerifiedGrant(input)] {
@@ -68,7 +62,11 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
             return try ProviderAccountParser.claude(credential)
         }
         let request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/profile", token: credential.accessToken)
-        let profile = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(request)))
+        let response = try await transport.send(request)
+        if nativeContext, response.statusCode == 401 {
+            throw AgentSwapError.nativeIdentityUnverified("현재 Claude 로그인 계정을 확인하지 못해 갱신을 보류했습니다. 공식 앱의 로그인을 확인한 뒤 다시 조회해 주세요.")
+        }
+        let profile = try ProviderJSON.object(ProviderHTTP.checked(response))
         guard let user = profile["account"] as? [String: Any], let org = profile["organization"] as? [String: Any],
               let userID = ProviderJSON.nonempty(user["uuid"]), let orgID = ProviderJSON.nonempty(org["uuid"]) else {
             throw AgentSwapError.unsupported("Claude 프로필 응답에서 계정 식별 정보를 찾지 못했습니다.")

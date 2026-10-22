@@ -207,6 +207,7 @@ public final class AppModel {
             var isActive = state.activeAccounts[account.provider] == id
             let running = await adapter.hasRunningConsumers()
             var nativeIdentityUnknown = false
+            var readOnlyClaudeUsage = false
             // The native login can change independently of the cached active account. In
             // particular, a registered Codex account must not rotate a grant now owned by
             // a running consumer just because its account row is encountered first.
@@ -217,9 +218,18 @@ public final class AppModel {
                     if account.provider == .codex {
                         throw AgentSwapError.storage("현재 Codex 인증을 확인하지 못해 토큰 갱신을 보류했습니다. \(error.localizedDescription)")
                     }
-                    throw error
+                    guard account.provider == .claude,
+                          let typed = error as? AgentSwapError, case .nativeIdentityUnverified = typed,
+                          credential.verifiedClaudeAccountIdentity == account.identity else { throw error }
+                    // A verified saved grant may still read its own usage. An unknown native
+                    // owner never authorizes rotation, application or active-state changes.
+                    imported = nil
+                    readOnlyClaudeUsage = true
+                    message = error.localizedDescription
                 }
-                if let imported, imported.account.identity == account.identity {
+                if readOnlyClaudeUsage {
+                    // Retain the last known active account and every pending generation.
+                } else if let imported, imported.account.identity == account.identity {
                     credential = try await reconcileNative(imported, accountID: id)
                     state.activeAccounts[account.provider] = id
                     isActive = true
@@ -237,13 +247,13 @@ public final class AppModel {
                 }
             }
             let consumersRunning = account.provider == .codex && running && (isActive || nativeIdentityUnknown)
-            if isActive, account.provider == .claude || !running, state.pendingNativeRefreshPredecessor?[id] != nil {
+            if !readOnlyClaudeUsage, isActive, account.provider == .claude || !running, state.pendingNativeRefreshPredecessor?[id] != nil {
                 let result = await applyToConfirmedCurrent(credential, account: account, adapter: adapter)
                 guard case .applied = result else { throw AgentSwapError.storage("저장된 새 \(account.provider.title) 인증의 적용을 기다립니다. 현재 계정을 확인한 뒤 다시 전환해 주세요.") }
                 clearPendingRefresh(id)
             }
-            if consumersRunning {
-                // Codex owns rotation while consumers are running; the latest token was re-collected above.
+            if consumersRunning || readOnlyClaudeUsage {
+                // Consumer-owned or unverified native authentication forbids app rotation.
             } else if credential.expiresAt.map({ $0.timeIntervalSince(now) < 120 }) ?? false {
                 try await markNativeRefreshIfNeeded(credential, account: account, isActive: isActive)
                 let predecessor = credential
@@ -265,7 +275,9 @@ public final class AppModel {
             var snapshot: UsageSnapshot
             do { snapshot = try await adapter.fetchUsage(credential, account: account) }
             catch let error as AgentSwapError {
-                if case .authentication = error, consumersRunning {
+                if case .authentication = error, readOnlyClaudeUsage {
+                    throw AgentSwapError.nativeIdentityUnverified("저장된 Claude 인증의 사용량을 조회하지 못했습니다. 현재 로그인 계정을 확인할 때까지 토큰 갱신과 인증 적용을 보류합니다.")
+                } else if case .authentication = error, consumersRunning {
                     snapshot = try await retryConsumerOwnedUsage(credential, account: account, adapter: adapter)
                 } else if case .authentication = error {
                     try await markNativeRefreshIfNeeded(credential, account: account, isActive: isActive)
@@ -294,7 +306,7 @@ public final class AppModel {
                 case .authentication:
                     cache.retryAfter = nil; cache.retryReason = nil
                     if let index = state.accounts.firstIndex(where: { $0.id == id }) { state.accounts[index].authenticationState = .needsLogin }
-                case .storage: cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .localFailure
+                case .storage, .nativeIdentityUnverified: cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .localFailure
                 default: cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .transientFailure
                 }
             } else { cache.retryAfter = now.addingTimeInterval(60); cache.retryReason = .transientFailure }
