@@ -27,7 +27,7 @@ struct MenuBarView: View {
             if model.isLoggingIn {
                 HStack {
                     ProgressView().controlSize(.small)
-                    Text("\(model.loggingInProvider?.title ?? "계정") 로그인 중")
+                    Text(model.reauthenticatingAccountID == nil ? "\(model.loggingInProvider?.title ?? "계정") 로그인 중" : "계정 재로그인 중")
                         .font(.subheadline)
                     Spacer()
                     Button("취소") { Task { await model.cancelLogin() } }
@@ -120,7 +120,7 @@ struct MenuBarView: View {
 
     @ViewBuilder
     private func providerSection(_ provider: Provider) -> some View {
-        let accounts = model.state.accounts.filter { $0.provider == provider }
+        let accounts = model.displayAccounts.filter { $0.provider == provider }
         let active = accounts.first { $0.id == model.state.activeAccounts[provider] }
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -198,7 +198,7 @@ struct MenuBarView: View {
             isPending: model.pendingSwitch[account.provider] == account.id,
             compatibility: model.compatibility[account.provider],
             isBusy: model.isBusy,
-            operationBlockReason: model.switchOperationBlockReason
+            operationBlockReason: model.switchOperationBlockReason(for: account.id)
         )
     }
 }

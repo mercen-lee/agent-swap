@@ -37,6 +37,8 @@ public protocol ProviderAdapter: Sendable {
     func openLoginPage() async throws
     func submitLoginCode(_ code: String) async throws
     func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential
+    /// Renews an independent saved login only while the native owner is proved different.
+    func refreshIndependentCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential
     /// Validates account ownership without exchanging a grant. Returned evidence is saved before usage.
     func verifyCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential
     func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot
@@ -59,6 +61,9 @@ public protocol ProviderAdapter: Sendable {
 }
 
 public extension ProviderAdapter {
+    func refreshIndependentCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        throw IndependentCredentialRefreshBlocked(message: "재로그인한 인증은 CLI·Desktop에 적용하지 않았습니다. 적용하려면 별도로 계정을 전환해 주세요.")
+    }
     func registerStoredCredential(_ credential: Credential, account: AccountRecord) async {}
     func verifyCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential { credential }
     func importCurrentIfPresent() async throws -> ImportedAccount? { try await importCurrent() }
@@ -87,4 +92,9 @@ public extension ProviderAdapter {
             return await activate(credential, account: account, relaunch: relaunch)
         } catch { return .failed(message: "현재 인증 백업 실패: \(error.localizedDescription)") }
     }
+}
+
+struct IndependentCredentialRefreshBlocked: LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
 }

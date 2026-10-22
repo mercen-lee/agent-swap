@@ -13,6 +13,7 @@ public final class AppModel {
     public private(set) var attentionProviders: Set<Provider> = []
     public private(set) var isLoggingIn = false
     public private(set) var loggingInProvider: Provider?
+    public private(set) var reauthenticatingAccountID: UUID?
     public private(set) var loginStatus: String?
     public private(set) var isSubmittingLoginCode = false
     public private(set) var canOpenLoginPage = false
@@ -22,12 +23,32 @@ public final class AppModel {
     public private(set) var claudeSessionRecoveryRequired = false
     public private(set) var claudeDesktopRecoveryRequired = false
 
+    /// Deleted and duplicate IDs are ignored; newly registered accounts follow in registration order.
+    public var displayAccounts: [AccountRecord] {
+        var records: [UUID: AccountRecord] = [:]
+        for account in state.accounts where records[account.id] == nil { records[account.id] = account }
+        var seen: Set<UUID> = []
+        return ((state.accountDisplayOrder ?? []) + state.accounts.map(\.id)).compactMap { id in
+            guard let account = records[id], seen.insert(id).inserted else { return nil }
+            return account
+        }
+    }
+
     /// UI and the engine share the lifecycle/storage blockers; a rejected operation must be explainable.
     public var switchOperationBlockReason: String? {
         if isPreparingForTermination { return "갱신된 인증을 저장하고 종료하는 중입니다." }
         if !storageHealthy { return "저장 오류로 계정 변경을 중단했습니다. 앱을 다시 실행해 주세요." }
         if isStarting { return "현재 로그인과 전환 호환성을 확인하고 있습니다." }
         if isBusy { return "다른 작업이 진행 중입니다. 완료 후 전환하세요." }
+        return nil
+    }
+    public func switchOperationBlockReason(for accountID: UUID) -> String? {
+        if let reason = switchOperationBlockReason { return reason }
+        guard let target = state.accounts.first(where: { $0.id == accountID }) else { return "전환할 계정이 더 이상 등록되어 있지 않습니다." }
+        if let source = state.activeAccounts[target.provider], source != accountID,
+           state.requiresExplicitCredentialApplication?.contains(source) == true {
+            return "현재 계정의 재로그인을 먼저 명시적으로 적용하거나 현재 로그인 가져오기로 선택한 뒤 다른 계정으로 전환해 주세요."
+        }
         return nil
     }
 
@@ -46,6 +67,7 @@ public final class AppModel {
     @ObservationIgnored private var storageHealthy = true
     @ObservationIgnored private var lastNotices: [Provider: Date] = [:]
     @ObservationIgnored private var pendingCredentialWrites: [UUID: Credential] = [:]
+    @ObservationIgnored private var pendingReauthentications: [UUID: (target: AccountRecord, imported: ImportedAccount)] = [:]
     @ObservationIgnored private var pendingCredentialGenerations: [UUID: UUID] = [:]
     @ObservationIgnored private var retainedNativeGenerations: [UUID: (before: String, after: String)] = [:]
     @ObservationIgnored private var pendingGenerationMarkerWrites: [UUID: String] = [:]
@@ -207,11 +229,13 @@ public final class AppModel {
             var isActive = state.activeAccounts[account.provider] == id
             let running = await adapter.hasRunningConsumers()
             var nativeIdentityUnknown = false
-            var readOnlyClaudeUsage = false
+            let requiresExplicitApplication = state.requiresExplicitCredentialApplication?.contains(id) == true
+            var readOnlyClaudeUsage = requiresExplicitApplication
+            var attemptedIndependentRefresh = false
             // The native login can change independently of the cached active account. In
             // particular, a registered Codex account must not rotate a grant now owned by
             // a running consumer just because its account row is encountered first.
-            if isActive || account.provider == .codex {
+            if !readOnlyClaudeUsage, isActive || account.provider == .codex {
                 let imported: ImportedAccount?
                 do { imported = try await adapter.importCurrentIfPresent() }
                 catch {
@@ -247,6 +271,16 @@ public final class AppModel {
                 }
             }
             let consumersRunning = account.provider == .codex && running && (isActive || nativeIdentityUnknown)
+            if requiresExplicitApplication, account.provider == .claude,
+               credential.expiresAt.map({ $0.timeIntervalSince(now) < 120 }) ?? false {
+                attemptedIndependentRefresh = true
+                do { credential = try await refreshIndependentCredential(credential, account: account, adapter: adapter) }
+                catch let blocked as IndependentCredentialRefreshBlocked { message = blocked.localizedDescription }
+                catch let typed as AgentSwapError {
+                    if case .nativeIdentityUnverified = typed { message = typed.localizedDescription }
+                    else { throw typed }
+                }
+            }
             if !readOnlyClaudeUsage, isActive, account.provider == .claude || !running, state.pendingNativeRefreshPredecessor?[id] != nil {
                 let result = await applyToConfirmedCurrent(credential, account: account, adapter: adapter)
                 guard case .applied = result else { throw AgentSwapError.storage("저장된 새 \(account.provider.title) 인증의 적용을 기다립니다. 현재 계정을 확인한 뒤 다시 전환해 주세요.") }
@@ -275,8 +309,12 @@ public final class AppModel {
             var snapshot: UsageSnapshot
             do { snapshot = try await adapter.fetchUsage(credential, account: account) }
             catch let error as AgentSwapError {
-                if case .authentication = error, readOnlyClaudeUsage {
-                    throw AgentSwapError.nativeIdentityUnverified("저장된 Claude 인증의 사용량을 조회하지 못했습니다. 현재 로그인 계정을 확인할 때까지 토큰 갱신과 인증 적용을 보류합니다.")
+                if case .authentication = error, requiresExplicitApplication, account.provider == .claude, !attemptedIndependentRefresh {
+                    do { credential = try await refreshIndependentCredential(credential, account: account, adapter: adapter) }
+                    catch let blocked as IndependentCredentialRefreshBlocked { throw AgentSwapError.storage(blocked.localizedDescription) }
+                    snapshot = try await adapter.fetchUsage(credential, account: account)
+                } else if case .authentication = error, readOnlyClaudeUsage {
+                    throw AgentSwapError.nativeIdentityUnverified("저장된 \(account.provider.title) 인증의 사용량을 조회하지 못했습니다. 현재 로그인 계정을 확인할 때까지 토큰 갱신과 인증 적용을 보류합니다.")
                 } else if case .authentication = error, consumersRunning {
                     snapshot = try await retryConsumerOwnedUsage(credential, account: account, adapter: adapter)
                 } else if case .authentication = error {
@@ -340,6 +378,13 @@ public final class AppModel {
         }
     }
 
+    private func refreshIndependentCredential(_ credential: Credential, account: AccountRecord,
+                                              adapter: any ProviderAdapter) async throws -> Credential {
+        let successor = try await adapter.refreshIndependentCredential(credential, account: account)
+        try await saveRotatedCredential(successor, predecessor: credential, accountID: account.id)
+        return successor
+    }
+
     public func importCurrent(_ provider: Provider) async {
         await KeychainInteraction.$mode.withValue(.interactive) { await importCurrentWithInteraction(provider) }
     }
@@ -362,12 +407,23 @@ public final class AppModel {
     public func login(_ provider: Provider) async {
         await KeychainInteraction.$mode.withValue(.interactive) { await loginWithInteraction(provider) }
     }
-    private func loginWithInteraction(_ provider: Provider) async {
+    public func reauthenticateAccount(_ id: UUID) async {
+        await KeychainInteraction.$mode.withValue(.interactive) {
+            guard let target = state.accounts.first(where: { $0.id == id }) else {
+                message = "재로그인할 계정이 더 이상 등록되어 있지 않습니다."
+                return
+            }
+            await loginWithInteraction(target.provider, reauthenticationTarget: target)
+        }
+    }
+    private func loginWithInteraction(_ provider: Provider, reauthenticationTarget: AccountRecord? = nil) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, !isLoggingIn, let adapter = adapters[provider] else { return }
-        isLoggingIn = true; loggingInProvider = provider
+        isLoggingIn = true; loggingInProvider = provider; reauthenticatingAccountID = reauthenticationTarget?.id
         let generation = UUID(); loginGeneration = generation
         canOpenLoginPage = false; isOpeningLoginPage = false
-        loginStatus = "브라우저에서 \(provider.title) 로그인을 완료해 주세요. 기존 계정과 분리된 임시 프로필을 사용합니다."
+        loginStatus = reauthenticationTarget == nil
+            ? "브라우저에서 \(provider.title) 로그인을 완료해 주세요. 기존 계정과 분리된 임시 프로필을 사용합니다."
+            : "브라우저에서 선택한 계정으로 로그인해 주세요. CLI·Desktop 로그인은 변경하지 않습니다."
         loginTask = Task { [weak self] in
             guard let self else { return }
             await self.operations.acquire(provider); self.beginOperation()
@@ -380,16 +436,31 @@ public final class AppModel {
                     do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
                 }
             }
+            var reauthenticatedID: UUID?
             do {
                 try Task.checkCancellation()
                 guard !self.isPreparingForTermination else { throw CancellationError() }
+                if let target = reauthenticationTarget { _ = try self.reauthenticationTarget(target) }
                 let imported = try await adapter.login()
-                try Task.checkCancellation()
-                let id = try await self.upsert(imported, origin: .isolated)
-                self.message = "\(provider.title) 계정을 등록했습니다."
-                await self.persist()
-                try Task.checkCancellation()
-                if self.storageHealthy, self.state.pendingNativeRefreshPredecessor?[id] != nil,
+                let id: UUID
+                if let target = reauthenticationTarget {
+                    try self.validateReauthentication(imported, target: target)
+                    _ = try self.reauthenticationTarget(target)
+                    self.pendingReauthentications[target.id] = (target, imported)
+                    try await self.flushReauthentication(target.id)
+                    id = target.id
+                    reauthenticatedID = id
+                    self.message = "선택한 계정의 재로그인을 저장했습니다. CLI·Desktop에 적용하려면 별도로 계정을 전환해 주세요."
+                } else {
+                    try Task.checkCancellation()
+                    id = try await self.upsert(imported, origin: .isolated)
+                    self.message = "\(provider.title) 계정을 등록했습니다."
+                    await self.persist()
+                }
+                if reauthenticationTarget == nil { try Task.checkCancellation() }
+                if reauthenticationTarget == nil, self.storageHealthy,
+                   self.state.requiresExplicitCredentialApplication?.contains(id) != true,
+                   self.state.pendingNativeRefreshPredecessor?[id] != nil,
                    let account = self.state.accounts.first(where: { $0.id == id }),
                    let current = try? await adapter.importCurrent(), current.account.identity == account.identity {
                     let credential = try await self.secrets.load(accountID: id) ?? imported.credential
@@ -410,10 +481,82 @@ public final class AppModel {
             self.compatibility[provider] = await adapter.compatibility()
             self.canOpenLoginPage = false; self.isOpeningLoginPage = false
             if self.loginGeneration == generation { self.loginGeneration = nil }
-            self.isLoggingIn = false; self.loggingInProvider = nil; self.loginStatus = nil; self.loginTask = nil
+            self.isLoggingIn = false; self.loggingInProvider = nil; self.reauthenticatingAccountID = nil
+            self.loginStatus = nil; self.loginTask = nil
             await self.finishOperation(provider)
-            await self.refreshDue(force: true)
+            if reauthenticationTarget == nil { await self.refreshDue(force: true) }
+            else if let id = reauthenticatedID, self.storageHealthy, !Task.isCancelled,
+                    self.state.usage[id]?.retryAfter.map({ $0 > Date() }) != true {
+                // A dedicated reauthentication reads only this account; it never evaluates automation.
+                await self.refreshAccount(id, now: Date())
+            }
         }
+    }
+    private func reauthenticationTarget(_ expected: AccountRecord) throws -> AccountRecord {
+        guard let current = state.accounts.first(where: {
+            $0.id == expected.id && $0.identity == expected.identity && $0.createdAt == expected.createdAt
+        }) else { throw AgentSwapError.storage("재로그인 중 계정이 삭제되거나 변경되어 인증을 저장하지 않았습니다.") }
+        return current
+    }
+    private func validateReauthentication(_ imported: ImportedAccount, target: AccountRecord) throws {
+        guard imported.account.identity == target.identity else {
+            throw AgentSwapError.authentication("선택한 계정과 다른 계정으로 로그인했습니다. 기존 인증은 유지했으므로 선택한 계정으로 다시 로그인해 주세요.")
+        }
+        let parsed: ImportedAccount
+        switch target.provider {
+        case .claude:
+            guard imported.credential.verifiedClaudeAccountIdentity == target.identity else {
+                throw AgentSwapError.storage("재로그인한 Claude 계정의 소유자를 확인하지 못해 기존 인증을 유지했습니다.")
+            }
+            parsed = try ProviderAccountParser.claude(imported.credential)
+        case .codex:
+            let credential = try CredentialParser.codex(rawAuth: imported.credential.rawAuth)
+            guard credential.accessToken == imported.credential.accessToken,
+                  credential.refreshToken == imported.credential.refreshToken else {
+                throw AgentSwapError.storage("재로그인한 Codex 인증과 저장 원본이 일치하지 않습니다.")
+            }
+            parsed = try ProviderAccountParser.codex(credential)
+        }
+        guard parsed.account.identity == target.identity else {
+            throw AgentSwapError.storage("재로그인한 인증 원본과 선택한 계정이 일치하지 않아 기존 인증을 유지했습니다.")
+        }
+    }
+    private func flushReauthentication(_ id: UUID) async throws {
+        guard let pending = pendingReauthentications[id] else { return }
+        _ = try reauthenticationTarget(pending.target)
+        try validateReauthentication(pending.imported, target: pending.target)
+        // Persist the independent-login fence first, so a restart cannot replace the fresh
+        // vault grant with the previous native login or apply it without an explicit choice.
+        if state.requiresExplicitCredentialApplication?.contains(id) != true {
+            if state.requiresExplicitCredentialApplication == nil { state.requiresExplicitCredentialApplication = [] }
+            state.requiresExplicitCredentialApplication?.insert(id)
+        }
+        do { try await store.save(state) }
+        catch { throw AgentSwapError.storage("재로그인과 적용 보류 상태를 메모리에 보존했습니다. 저장을 완료한 뒤 다시 조회해 주세요.") }
+        do {
+            try await secrets.save(pending.imported.credential, accountID: id)
+            guard try await secrets.load(accountID: id) == pending.imported.credential else {
+                throw AgentSwapError.storage("재로그인한 인증의 저장 결과를 확인하지 못했습니다.")
+            }
+        } catch {
+            throw AgentSwapError.storage("재로그인한 인증을 메모리에 보존했습니다. 저장된 인증 접근을 허용한 뒤 다시 시도해 주세요. \(error.localizedDescription)")
+        }
+        let latest = try reauthenticationTarget(pending.target)
+        var updated = latest
+        updated.email = pending.imported.account.email
+        updated.workspaceName = pending.imported.account.workspaceName
+        if !pending.imported.account.plan.isEmpty { updated.plan = pending.imported.account.plan }
+        updated.authenticationState = .valid
+        if let index = state.accounts.firstIndex(where: { $0.id == id }) { state.accounts[index] = updated }
+        if var cache = state.usage[id], cache.retryReason == .localFailure {
+            cache.retryAfter = nil; cache.retryReason = nil; cache.attemptedAt = nil
+            state.usage[id] = cache
+        }
+        await adapters[latest.provider]?.discardPendingCredentialPersistence(accountID: id)
+        discardRetainedCredential(id, includingReauthentication: false)
+        do { try await store.save(state) }
+        catch { throw AgentSwapError.storage("재로그인은 Keychain에 보존했습니다. 계정 상태 저장을 완료한 뒤 다시 조회해 주세요.") }
+        pendingReauthentications.removeValue(forKey: id)
     }
     public func openLoginPage() async {
         guard !isPreparingForTermination, isLoggingIn, canOpenLoginPage, !isOpeningLoginPage,
@@ -502,6 +645,7 @@ public final class AppModel {
             let running = await adapter.hasRunningConsumers()
             let current: ImportedAccount?
             current = try await adapter.importCurrentIfPresent()
+            if let current { try verifyReauthenticatedSourceCanSwitch(current, targetAccountID: id) }
             if account.provider == .claude {
                 try await verifyClaudeSessionSwitchBoundary(source: current?.account, target: account, desktopPreparation: desktopPreparation)
                 try validateClaudeSwitchState(account)
@@ -520,10 +664,16 @@ public final class AppModel {
                 credential = try await reconcileNative(current, accountID: id)
             }
             if !activeAndRunning, credential.expiresAt.map({ $0.timeIntervalSinceNow < 120 }) ?? false {
-                try await markNativeRefreshIfNeeded(credential, account: account, isActive: state.activeAccounts[account.provider] == id)
-                let predecessor = credential
-                credential = try await adapter.refresh(credential, account: account)
-                try await saveRotatedCredential(credential, predecessor: predecessor, accountID: id)
+                if state.requiresExplicitCredentialApplication?.contains(id) == true {
+                    // A separate login must not be replaced by the native grant simply
+                    // because both belong to the same user. Require the inactive boundary.
+                    credential = try await refreshIndependentCredential(credential, account: account, adapter: adapter)
+                } else {
+                    try await markNativeRefreshIfNeeded(credential, account: account, isActive: state.activeAccounts[account.provider] == id)
+                    let predecessor = credential
+                    credential = try await adapter.refresh(credential, account: account)
+                    try await saveRotatedCredential(credential, predecessor: predecessor, accountID: id)
+                }
             }
             if account.provider == .claude {
                 try await verifyClaudeSessionSwitchBoundary(source: current?.account, target: account, desktopPreparation: desktopPreparation)
@@ -537,7 +687,7 @@ public final class AppModel {
                     guard let self else { throw CancellationError() }
                     try await self.rejectChangedClaudeSource(current)
                 }
-                try await self?.saveLatestSource(current)
+                try await self?.saveLatestSource(current, targetAccountID: id)
                 try Task.checkCancellation()
                 if account.provider == .claude {
                     try await self?.verifyClaudeSessionSwitchBoundary(source: current.account, target: account, desktopPreparation: desktopPreparation)
@@ -716,7 +866,12 @@ public final class AppModel {
     }
     private func evaluateAutomaticSwitch(_ provider: Provider, now: Date) async {
         guard pendingSwitch[provider] == nil else { return }
-        switch AutomaticSwitchPolicy.decide(provider: provider, state: state, now: now) {
+        if let active = state.activeAccounts[provider], state.requiresExplicitCredentialApplication?.contains(active) == true { return }
+        var eligibleState = state
+        for index in eligibleState.accounts.indices where state.requiresExplicitCredentialApplication?.contains(eligibleState.accounts[index].id) == true {
+            eligibleState.accounts[index].automaticSwitchEligible = false
+        }
+        switch AutomaticSwitchPolicy.decide(provider: provider, state: eligibleState, now: now) {
         case .switchTo(let id): await switchAccountWithCurrentInteraction(id, relaunch: false)
         case .noCandidate:
             attentionProviders.insert(provider)
@@ -727,7 +882,14 @@ public final class AppModel {
         default: attentionProviders.remove(provider)
         }
     }
-    private func saveLatestSource(_ current: ImportedAccount) async throws {
+    private func verifyReauthenticatedSourceCanSwitch(_ current: ImportedAccount, targetAccountID: UUID) throws {
+        if let source = state.accounts.first(where: { $0.identity == current.account.identity }),
+           source.id != targetAccountID, state.requiresExplicitCredentialApplication?.contains(source.id) == true {
+            throw AgentSwapError.storage("현재 계정의 재로그인을 먼저 명시적으로 적용하거나 현재 로그인 가져오기로 선택한 뒤 다른 계정으로 전환해 주세요.")
+        }
+    }
+    private func saveLatestSource(_ current: ImportedAccount, targetAccountID: UUID) async throws {
+        try verifyReauthenticatedSourceCanSwitch(current, targetAccountID: targetAccountID)
         guard let oldID = state.accounts.first(where: { $0.identity == current.account.identity })?.id else {
             // A successful callback promises a durable backup. An external login that has
             // never been registered has no vault slot; require import before replacing it.
@@ -751,6 +913,7 @@ public final class AppModel {
     }
     private func clearPendingRefresh(_ id: UUID) {
         state.pendingNativeRefreshPredecessor?.removeValue(forKey: id)
+        state.requiresExplicitCredentialApplication?.remove(id)
         pendingGenerationMarkerWrites.removeValue(forKey: id)
         for provider in Provider.allCases where pendingSwitch[provider] == id { pendingSwitch.removeValue(forKey: provider) }
     }
@@ -758,6 +921,21 @@ public final class AppModel {
         try await flushPendingCredentialWrite(accountID)
         let native = current.credential
         let provider = current.account.provider
+        if state.requiresExplicitCredentialApplication?.contains(accountID) == true {
+            if acceptExternalNative {
+                try await secrets.save(native, accountID: accountID)
+                guard try await secrets.load(accountID: accountID) == native else {
+                    throw AgentSwapError.storage("선택한 현재 로그인의 저장 결과를 확인하지 못했습니다.")
+                }
+                clearPendingRefresh(accountID)
+                discardRetainedCredential(accountID)
+                return native
+            }
+            guard let protected = try await secrets.load(accountID: accountID) else {
+                throw AgentSwapError.storage("재로그인한 인증을 확인하지 못했습니다. 현재 로그인을 명시적으로 가져오거나 다시 재로그인해 주세요.")
+            }
+            return protected
+        }
         if let retained = retainedNativeGenerations[accountID] {
             let nativeDigest = Self.digest(native.rawAuth)
             if nativeDigest == retained.before, nativeDigest != retained.after,
@@ -805,7 +983,7 @@ public final class AppModel {
             guard current.account.identity == account.identity else {
                 throw AgentSwapError.storage("현재 계정이 외부에서 변경되어 새 인증의 자동 적용을 중단했습니다.")
             }
-            try await self?.saveLatestSource(current)
+            try await self?.saveLatestSource(current, targetAccountID: account.id)
         }
     }
     private nonisolated static func digest(_ data: Data) -> String {
@@ -821,6 +999,28 @@ public final class AppModel {
               let vaultAccount = try? ProviderAccountParser.claude(parsedVault).account else { return false }
         return nativeAccount.identity == identity && vaultAccount.identity == identity
     }
+    /// Moves only the displayed subset, retaining the slots of every hidden account.
+    public func moveAccounts(fromOffsets: IndexSet, toOffset: Int, visibleAccountIDs: [UUID]) async {
+        guard storageHealthy, !isStarting, !isPreparingForTermination,
+              !fromOffsets.isEmpty, toOffset >= 0, toOffset <= visibleAccountIDs.count,
+              fromOffsets.allSatisfy({ $0 >= 0 && $0 < visibleAccountIDs.count }) else { return }
+        let visible = Set(visibleAccountIDs)
+        guard visible.count == visibleAccountIDs.count else { return }
+        let currentOrder = displayAccounts.map(\.id)
+        // An obsolete UI snapshot must not move different rows after a filter or order change.
+        guard currentOrder.filter({ visible.contains($0) }) == visibleAccountIDs else { return }
+        let moved = fromOffsets.map { visibleAccountIDs[$0] }
+        var reordered = visibleAccountIDs.enumerated().compactMap { fromOffsets.contains($0.offset) ? nil : $0.element }
+        let insertion = toOffset - fromOffsets.filter({ $0 < toOffset }).count
+        reordered.insert(contentsOf: moved, at: insertion)
+        guard reordered != visibleAccountIDs else { return }
+        var updatedOrder = currentOrder
+        let visibleSlots = currentOrder.indices.filter { visible.contains(currentOrder[$0]) }
+        for (slot, id) in zip(visibleSlots, reordered) { updatedOrder[slot] = id }
+        state.accountDisplayOrder = updatedOrder
+        await persist()
+    }
+
     public func updateAccount(_ id: UUID, nickname: String? = nil, automaticSwitchEligible: Bool? = nil) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, let index = state.accounts.firstIndex(where: { $0.id == id }) else { return }
         if let nickname { state.accounts[index].nickname = nickname }
@@ -841,7 +1041,9 @@ public final class AppModel {
             await adapters[account.provider]?.discardPendingCredentialPersistence(accountID: id)
             discardRetainedCredential(id)
             state.accounts.removeAll { $0.id == id }; state.usage.removeValue(forKey: id)
+            state.accountDisplayOrder?.removeAll { $0 == id }
             state.pendingNativeRefreshPredecessor?.removeValue(forKey: id)
+            state.requiresExplicitCredentialApplication?.remove(id)
             if state.activeAccounts[account.provider] == id { state.activeAccounts.removeValue(forKey: account.provider) }
             if pendingSwitch[account.provider] == id { pendingSwitch.removeValue(forKey: account.provider) }
             await persist()
@@ -963,7 +1165,7 @@ public final class AppModel {
                 catch { failure = error.localizedDescription }
             }
         }
-        if failure == nil, !pendingCredentialWrites.isEmpty {
+        if failure == nil, !pendingCredentialWrites.isEmpty || !pendingReauthentications.isEmpty {
             failure = "저장할 계정을 확인하지 못한 갱신 인증을 메모리에 보존하고 있습니다."
         }
         for provider in Provider.allCases { await operations.release(provider) }
@@ -1004,6 +1206,10 @@ public final class AppModel {
             try await flushPendingCredentialWrite(account.id)
         }
         try await flushPendingGenerationMarkers(provider)
+        for id in pendingReauthentications.keys.sorted(by: { $0.uuidString < $1.uuidString })
+        where pendingReauthentications[id]?.target.provider == provider {
+            try await flushReauthentication(id)
+        }
     }
     private func saveRotatedCredential(_ credential: Credential, predecessor: Credential, accountID: UUID) async throws {
         pendingCredentialWrites[accountID] = credential
@@ -1026,8 +1232,9 @@ public final class AppModel {
             pendingCredentialWrites.removeValue(forKey: id); pendingCredentialGenerations.removeValue(forKey: id)
         }
     }
-    private func discardRetainedCredential(_ id: UUID) {
+    private func discardRetainedCredential(_ id: UUID, includingReauthentication: Bool = true) {
         pendingCredentialWrites.removeValue(forKey: id); pendingCredentialGenerations.removeValue(forKey: id)
+        if includingReauthentication { pendingReauthentications.removeValue(forKey: id) }
         retainedNativeGenerations.removeValue(forKey: id)
         pendingGenerationMarkerWrites.removeValue(forKey: id)
     }

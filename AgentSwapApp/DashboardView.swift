@@ -23,12 +23,13 @@ struct DashboardView: View {
     @State private var showsInspector = true
     @State private var isAddingAccount = false
     @State private var editingAccount: AccountRecord?
+    @State private var reauthenticatingAccount: AccountRecord?
     @State private var deletingAccount: AccountRecord?
     @State private var statusDetails: StatusMessage?
     @State private var keepingCurrentRecoveryAccount: AccountRecord?
 
     private var filteredAccounts: [AccountRecord] {
-        model.state.accounts.filter { account in
+        model.displayAccounts.filter { account in
             (filter?.provider == nil || account.provider == filter?.provider) &&
             (search.isEmpty || [account.displayName, account.email, account.workspaceName, account.plan]
                 .contains { $0.localizedCaseInsensitiveContains(search) })
@@ -62,6 +63,16 @@ struct DashboardView: View {
                     }
                     .disabled(model.isBusy)
                     .help("모든 계정 새로고침 (⌘R)")
+                    Menu {
+                        Button("위로 이동", systemImage: "arrow.up") { moveSelectedAccount(up: true) }
+                            .disabled(!canMoveSelectedAccount(up: true))
+                        Button("아래로 이동", systemImage: "arrow.down") { moveSelectedAccount(up: false) }
+                            .disabled(!canMoveSelectedAccount(up: false))
+                    } label: {
+                        Label("계정 순서", systemImage: "arrow.up.arrow.down")
+                    }
+                    .disabled(model.isBusy || selectedAccount == nil)
+                    .help("선택한 계정을 위아래로 이동합니다. 목록에서 드래그해도 순서를 바꿀 수 있습니다.")
                     Button {
                         isAddingAccount = true
                     } label: {
@@ -88,6 +99,9 @@ struct DashboardView: View {
             EditAccountSheet(account: account) { name in
                 Task { await model.updateAccount(account.id, nickname: name, automaticSwitchEligible: nil) }
             }
+        }
+        .sheet(item: $reauthenticatingAccount) { account in
+            ReauthenticateAccountSheet(model: model, account: account)
         }
         .alert("계정을 삭제할까요?", isPresented: Binding(
             get: { deletingAccount != nil },
@@ -195,7 +209,9 @@ struct DashboardView: View {
     }
 
     private var accountListContent: some View {
-        List(selection: $selectedID) {
+        let visibleAccounts = filteredAccounts
+        let visibleIDs = visibleAccounts.map(\.id)
+        return List(selection: $selectedID) {
             Section("현재 계정") {
                 ForEach(Provider.allCases.filter { filter?.provider == nil || $0 == filter?.provider }) { provider in
                     CurrentAccountRow(
@@ -206,7 +222,7 @@ struct DashboardView: View {
                 }
             }
             Section("저장된 계정") {
-                ForEach(filteredAccounts) { account in
+                ForEach(visibleAccounts) { account in
                     AccountRow(
                         account: account,
                         cache: model.state.usage[account.id],
@@ -223,6 +239,8 @@ struct DashboardView: View {
                         .disabled(!presentation.canSwitch)
                         .help(presentation.help)
                         .accessibilityHint(presentation.help)
+                        Button("재로그인…", systemImage: "arrow.clockwise.circle") { reauthenticatingAccount = account }
+                            .disabled(model.isBusy || model.isLoggingIn)
                         Button("별명 변경", systemImage: "pencil") { editingAccount = account }
                         Toggle("자동 전환 후보", isOn: Binding(
                             get: { account.automaticSwitchEligible },
@@ -231,8 +249,17 @@ struct DashboardView: View {
                             }
                         ))
                         Divider()
+                        Button("위로 이동", systemImage: "arrow.up") { moveAccount(account.id, up: true) }
+                            .disabled(model.isBusy || !canMoveAccount(account.id, up: true))
+                        Button("아래로 이동", systemImage: "arrow.down") { moveAccount(account.id, up: false) }
+                            .disabled(model.isBusy || !canMoveAccount(account.id, up: false))
+                        Divider()
                         Button("계정 삭제", systemImage: "trash", role: .destructive) { deletingAccount = account }
                     }
+                    .moveDisabled(model.isBusy)
+                }
+                .onMove { offsets, destination in
+                    Task { await model.moveAccounts(fromOffsets: offsets, toOffset: destination, visibleAccountIDs: visibleIDs) }
                 }
             }
         }
@@ -258,7 +285,7 @@ struct DashboardView: View {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("\(model.loggingInProvider?.title ?? "계정") 로그인 중")
+                            Text(loginTitle).lineLimit(1)
                             Text(model.loginStatus ?? "브라우저에서 로그인을 완료해주세요.")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .textSelection(.enabled)
@@ -336,9 +363,11 @@ struct DashboardView: View {
                 needsDesktopRecovery: model.claudeDesktopRecoveryRequired,
                 compatibility: model.compatibility[account.provider],
                 isBusy: model.isBusy,
-                switchOperationBlockReason: model.switchOperationBlockReason,
+                switchOperationBlockReason: model.switchOperationBlockReason(for: account.id),
+                requiresExplicitApplication: model.state.requiresExplicitCredentialApplication?.contains(account.id) == true,
                 onSwitch: { relaunch in Task { await model.switchAccount(account.id, relaunch: relaunch) } },
                 onEdit: { editingAccount = account },
+                onReauthenticate: { reauthenticatingAccount = account },
                 onDelete: { deletingAccount = account },
                 onEligibility: { value in Task { await model.updateAccount(account.id, nickname: nil, automaticSwitchEligible: value) } },
                 onRecover: { Task { await model.recoverInterruptedSwitch(account.provider) } },
@@ -362,8 +391,37 @@ struct DashboardView: View {
             isPending: model.pendingSwitch[account.provider] == account.id,
             compatibility: model.compatibility[account.provider],
             isBusy: model.isBusy,
-            operationBlockReason: model.switchOperationBlockReason
+            operationBlockReason: model.switchOperationBlockReason(for: account.id)
         )
+    }
+
+    private func canMoveAccount(_ id: UUID, up: Bool) -> Bool {
+        guard let index = filteredAccounts.firstIndex(where: { $0.id == id }) else { return false }
+        return up ? index > 0 : index + 1 < filteredAccounts.count
+    }
+
+    private var loginTitle: String {
+        if let id = model.reauthenticatingAccountID,
+           let account = model.state.accounts.first(where: { $0.id == id }) {
+            return "\(account.displayName) 재로그인 중"
+        }
+        return "\(model.loggingInProvider?.title ?? "계정") 로그인 중"
+    }
+
+    private func canMoveSelectedAccount(up: Bool) -> Bool {
+        selectedID.map { canMoveAccount($0, up: up) } ?? false
+    }
+
+    private func moveSelectedAccount(up: Bool) {
+        guard let selectedID else { return }
+        moveAccount(selectedID, up: up)
+    }
+
+    private func moveAccount(_ id: UUID, up: Bool) {
+        let visibleIDs = filteredAccounts.map(\.id)
+        guard let index = visibleIDs.firstIndex(of: id), canMoveAccount(id, up: up) else { return }
+        Task { await model.moveAccounts(fromOffsets: IndexSet(integer: index), toOffset: up ? index - 1 : index + 2,
+                                       visibleAccountIDs: visibleIDs) }
     }
 }
 

@@ -133,11 +133,15 @@ public struct AppSettings: Codable, Equatable, Sendable {
 public struct PersistedState: Codable, Equatable, Sendable {
     public var schemaVersion: Int = 1
     public var accounts: [AccountRecord] = []
+    /// Presentation order is independent of registration order and automatic-switch ties.
+    public var accountDisplayOrder: [UUID]? = nil
     public var activeAccounts: [Provider: UUID] = [:]
     public var usage: [UUID: UsageCache] = [:]
     public var lastSwitch: [Provider: Date] = [:]
     /// Non-secret before-image hashes keep a rotated grant from being overwritten by stale native auth.
     public var pendingNativeRefreshPredecessor: [UUID: String]? = nil
+    /// Independent reauthentication must not apply its new grant without an explicit switch.
+    public var requiresExplicitCredentialApplication: Set<UUID>? = nil
     public var settings: AppSettings = .init()
     public init() {}
 }

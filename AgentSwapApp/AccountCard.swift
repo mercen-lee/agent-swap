@@ -66,8 +66,10 @@ struct AccountDetailView: View {
     let compatibility: CompatibilityStatus?
     let isBusy: Bool
     let switchOperationBlockReason: String?
+    let requiresExplicitApplication: Bool
     let onSwitch: (Bool) -> Void
     let onEdit: () -> Void
+    let onReauthenticate: () -> Void
     let onDelete: () -> Void
     let onEligibility: @MainActor @Sendable (Bool) -> Void
     let onRecover: () -> Void
@@ -99,6 +101,16 @@ struct AccountDetailView: View {
                 let plan = cache?.snapshot?.plan ?? account.plan
                 if !plan.isEmpty { LabeledContent("플랜", value: plan) }
                 LabeledContent("인증", value: UsagePresentation.authenticationLabel(account.authenticationState))
+                Button("재로그인…", systemImage: "arrow.clockwise.circle", action: onReauthenticate)
+                    .disabled(isBusy)
+                if requiresExplicitApplication {
+                    Label("새 인증 저장됨 · 적용 대기", systemImage: "clock")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(account.provider == .claude
+                         ? "저장된 새 인증으로 사용량을 조회합니다. CLI에 적용하려면 계정 전환을 실행하세요."
+                         : "Codex에 적용하기 전에는 토큰 자동 갱신을 보류합니다. 실행 중인 작업을 마친 뒤 계정 전환을 실행하세요.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if isActive { Label("현재 활성 계정", systemImage: "checkmark.circle") }
                 Toggle("자동 전환 후보", isOn: Binding(get: { account.automaticSwitchEligible }, set: onEligibility))
             }
@@ -347,6 +359,44 @@ struct AddAccountSheet: View {
             if selectedMethod == .browser { await model.login(selectedProvider) }
             else { await model.importCurrent(selectedProvider) }
         }
+    }
+}
+
+struct ReauthenticateAccountSheet: View {
+    let model: AppModel
+    let account: AccountRecord
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section("계정 재로그인") {
+                    LabeledContent("계정", value: account.displayName)
+                    LabeledContent("제공자", value: account.provider.title)
+                    if !account.email.isEmpty { LabeledContent("이메일", value: account.email) }
+                    LabeledContent("워크스페이스", value: account.workspaceName.isEmpty ? account.identity.workspaceID : account.workspaceName)
+                }
+                Section {
+                    Text("브라우저에서 위와 같은 계정·워크스페이스로 로그인하세요. 확인된 새 인증으로 이 계정만 갱신하고 별명과 목록 순서를 유지합니다.")
+                    Text("현재 CLI와 Desktop 로그인은 유지합니다. 새 인증 적용은 재로그인 후 계정 전환으로 진행합니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("취소", role: .cancel) { dismiss() }
+                Button("브라우저에서 재로그인") {
+                    dismiss()
+                    Task { await model.reauthenticateAccount(account.id) }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.isBusy || model.isLoggingIn)
+            }
+            .padding()
+        }
+        .frame(width: 440, height: 350)
     }
 }
 

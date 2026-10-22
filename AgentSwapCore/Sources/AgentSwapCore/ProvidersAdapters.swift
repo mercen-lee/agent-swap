@@ -129,6 +129,12 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         try await verifiedCredential(credential, account: account)
     }
     public func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        try await refreshCredential(credential, account: account, requiresInactive: false)
+    }
+    public func refreshIndependentCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        try await refreshCredential(credential, account: account, requiresInactive: true)
+    }
+    private func refreshCredential(_ credential: Credential, account: AccountRecord, requiresInactive: Bool) async throws -> Credential {
         // Reject malformed OAuth metadata without making even a profile request.
         _ = try refreshRequestBody(credential)
         let verifiedInput = try await verifiedCredential(credential, account: account)
@@ -137,7 +143,7 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
             native = try await identifyNative(current)
         } else { native = nil }
         let rotated = try await authStore.refresh(verifiedInput, accountID: account.id,
-            verifiedNative: native, requiresVerifiedNative: true) { input in
+            verifiedNative: native, requiresVerifiedNative: true, requiresInactive: requiresInactive) { input in
             try self.validateSavedIdentity(input, account: account)
             return try await self.refreshToken(input, account: account)
         }

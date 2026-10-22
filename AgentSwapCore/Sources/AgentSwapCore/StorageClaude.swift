@@ -834,7 +834,7 @@ public actor ClaudeAuthStore {
     /// Active refresh holds Claude's own refresh locks across the HTTP exchange; inactive refresh never writes live auth.
     /// The successor is saved immediately to the same injected application Keychain before updating provider stores.
     public func refresh(_ credential: Credential, accountID: UUID, verifiedNative: ImportedAccount? = nil,
-                        requiresVerifiedNative: Bool = false,
+                        requiresVerifiedNative: Bool = false, requiresInactive: Bool = false,
                         operation: @Sendable (Credential) async throws -> Credential) async throws -> Credential {
         guard !refreshing else { throw AgentSwapError.storage("Claude 토큰 갱신이 이미 진행 중입니다.") }
         try persistRetainedCredentials()
@@ -895,6 +895,9 @@ public actor ClaudeAuthStore {
             throw AgentSwapError.storage("현재 Claude 인증 세대와 불완전한 계정 정보를 확인하지 못했습니다. 현재 로그인을 다시 가져오세요.")
         }
         let active = raw != nil && identity.matches && (identity.complete || sameGrant)
+        if requiresInactive, verifiedNative == nil || active {
+            throw IndependentCredentialRefreshBlocked(message: "현재 CLI 로그인과 다른 계정인지 확인할 때까지 재로그인한 인증의 갱신을 보류합니다. 인증을 적용하려면 별도로 계정을 전환해 주세요.")
+        }
         if let completed = persistedInactiveCredentials[accountID] {
             guard try sameIdentity(completed.credential.accountMetadata, credential.accountMetadata) else {
                 throw AgentSwapError.authentication("보존한 Claude 갱신 인증과 요청한 계정이 일치하지 않습니다.")
