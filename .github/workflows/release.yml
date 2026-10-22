@@ -91,8 +91,8 @@ jobs:
           Extract the ZIP to obtain AgentSwap.app. Verify it with the included SHA256SUMS.
           AgentSwap checks GitHub Releases for updates. The signed appcast.xml and ZIP are hosted as release assets; no separate update server is used.
           Versions before v0.1.0-beta.6 need a one-time manual download to enable the updater.
-          The app uses the project's dedicated signing certificate so its Keychain identity is stable across updates. This is a self-signed certificate; Apple Developer ID signing and notarization are not included.
-          Releases through v0.1.0-beta.7 used ad-hoc signing. Upgrading from those versions can require a one-time Keychain approval.
+          The app uses the project's dedicated self-signed certificate and pinned designated requirement. Apple Developer ID signing and notarization are not included.
+          macOS also checks Keychain partitions, which identify this self-signed app by executable cdhash. Account access may require renewed foreground approval after each update even when the certificate is unchanged. Use the app's saved-account access action before retrying usage reads.
           The project remains in development. See README and docs/VALIDATION.md for known limitations.
           NOTES
           gh release create "$AGENTSWAP_TAG" "$AGENTSWAP_ZIP" "$AGENTSWAP_CHECKSUMS" "$AGENTSWAP_APPCAST" \

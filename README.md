@@ -69,6 +69,8 @@ open build/AgentSwap.app --args --demo
 
 릴리스 담당자가 `v0.1.0` 또는 `v0.1.0-beta.1` 형태의 버전 태그를 원격 저장소에 push하면 [릴리스 워크플로](.github/workflows/release.yml)가 Core 테스트와 Universal Release 패키징을 실행합니다. `arm64`·`x86_64`를 포함한 앱 ZIP·`SHA256SUMS`·Sparkle `appcast.xml`이 GitHub 릴리스 초안에 첨부됩니다. beta.8부터 앱은 고정된 전용 인증서로 서명하며, 인증서가 없거나 일치하지 않으면 릴리스를 중단합니다. 태그에 사전 버전 접미사가 있으면 prerelease로 표시하며, 업데이트 ZIP은 별도의 EdDSA 키로 서명합니다.
 
+현재 self-signed 앱은 macOS Keychain의 추가 partition 검사에서 실행 파일의 `cdhash`로 구분됩니다. 인증서와 designated requirement가 같아도 업데이트 후 계정별 접근 승인이 다시 필요할 수 있습니다. 앱 메뉴의 **저장된 계정 접근 허용…**에서 읽기를 승인한 뒤 조회를 다시 실행하세요. 고정 인증서만으로 업데이트 간 Keychain 접근 유지가 완료된 상태는 아닙니다.
+
 워크플로는 태그를 만들거나 릴리스를 자동 공개하지 않습니다. 담당자가 GitHub의 Releases에서 초안·릴리스 노트·산출물을 검토한 뒤 공개 여부를 결정합니다. 태그의 숫자 기본 버전은 앱 버전에, 소스 커밋의 Unix 시각은 빌드 번호에 사용합니다.
 
 같은 패키징을 로컬에서 실행할 수 있습니다.

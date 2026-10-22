@@ -67,9 +67,11 @@ CI는 개인 키를 Sparkle 도구의 표준 입력으로 전달합니다. 패�
 
 Hardened Runtime은 유지합니다. 별도 identity의 Sparkle 프레임워크를 불러오기 위해 현재 self-signed 공개 패키지와 로컬 개발 빌드는 `AgentSwap-AdHoc.entitlements`의 library validation 예외를 적용합니다. 공개 패키지는 기본 디버깅 entitlement 주입을 끕니다. 향후 Developer ID 배포 파이프라인을 만들 때는 포함된 코드를 같은 identity로 서명하고 library validation 예외를 제거해야 합니다. 이 예외는 Apple 공증을 대신하지 않습니다. [Sparkle 설정 안내](https://sparkle-project.org/documentation/)
 
-### Keychain 앱 식별을 유지하는 릴리즈 서명
+### 앱 서명 고정과 Keychain 접근 제한
 
 beta.8부터 `scripts/signing/release-certificate.cer`의 공개 인증서를 고정합니다. 앱의 designated requirement는 `net.mercen.agentswap` 식별자와 이 인증서의 hash를 함께 요구합니다. 인증서를 새로 만들거나 ad-hoc으로 대체하면 기존 Keychain 승인을 유지할 수 없으므로, 인증서·개인 키는 계속 재사용해야 합니다. 공개 DER만 Git에 포함하며 개인 키·P12·암호는 포함하지 않습니다. self-signed 서명은 Apple Developer ID나 공증이 아닙니다. [Apple 코드 서명 정책](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)
+
+고정 DR은 Keychain의 partition 검사를 대체하지 않습니다. Apple 팀 서명으로 식별되지 않는 self-signed 앱은 `cdhash:` partition을 사용하므로 바이너리가 바뀌면 기존 항목의 전경 읽기 승인으로 새 partition을 허용해야 할 수 있습니다. 일반 ACL이 같은 인증서를 신뢰하는 것만으로 업데이트 연속성을 주장하지 마세요. Apple Security의 [클라이언트 partition 식별](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp#L282)과 [추가 ACL 검사 및 전경 승인](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/acls.cpp#L119)에 해당 조건이 있습니다. 임의의 `req:` partition, 모든 앱 허용, 시스템 신뢰 변경을 검증된 해결책으로 취급하지 않습니다.
 
 CI는 encrypted repository secrets `AGENTSWAP_SIGNING_P12_BASE64`·`AGENTSWAP_SIGNING_P12_PASSWORD`를 `prepare-release-signing.py`에 전달합니다. 준비 프로그램이 환경에서 비밀 값을 제거한 뒤 표준 입력으로만 임시 Keychain에 가져옵니다. 기본 Keychain·검색 목록·시스템 신뢰 설정은 바꾸지 않으며 `always()` 정리 단계에서 임시 Keychain을 삭제합니다. 개인 Apple Development 인증서를 내보내 이 용도로 사용하지 않습니다.
 
