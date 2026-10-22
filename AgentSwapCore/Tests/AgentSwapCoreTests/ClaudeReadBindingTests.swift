@@ -25,12 +25,17 @@ private struct BindingLogin: ProviderLoginRunner {
 }
 private actor BindingTransport: ProviderHTTPTransport {
     let profile: Data
+    var targetProfile: Data?
     var requests: [URLRequest] = []
     init(_ profile: Data) { self.profile = profile }
     func send(_ request: URLRequest) -> ProviderHTTPResponse {
         requests.append(request)
+        if request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-target-access", let targetProfile {
+            return .init(data: targetProfile, statusCode: 200)
+        }
         return .init(data: profile, statusCode: 200)
     }
+    func setTargetProfile(_ data: Data) { targetProfile = data }
 }
 private actor BindingVault: SecretStore {
     var saves = 0
@@ -91,7 +96,7 @@ private struct BindingFixture {
 
 @Suite("Claude native source workspace binding")
 struct ClaudeReadBindingTests {
-    @Test("A native grant cannot be imported under another cached workspace or saved to the vault")
+    @Test("A native grant is identified by its profile when the cached workspace is stale")
     @MainActor func mismatchedWorkspace() async throws {
         let fixture = try BindingFixture(cachedOrganization: BindingFixture.otherOrganization)
         defer { fixture.cleanup() }
@@ -99,18 +104,19 @@ struct ClaudeReadBindingTests {
         #expect(!(await fixture.store.compatibility()).canWrite)
         let transport = BindingTransport(try fixture.profile())
         let adapter = ClaudeProviderAdapter(authStore: fixture.store, transport: transport, loginRunner: BindingLogin())
-        await #expect(throws: AgentSwapError.self) { try await adapter.importCurrent() }
+        let imported = try await adapter.importCurrent()
+        #expect(imported.account.identity.workspaceID == BindingFixture.organization)
         let vault = BindingVault()
         let model = AppModel(adapters: [adapter], secrets: vault, store: BindingState())
         await model.importCurrent(.claude)
-        #expect(model.state.accounts.isEmpty)
-        #expect(model.state.activeAccounts[.claude] == nil)
-        #expect(await vault.saves == 0)
-        #expect(await transport.requests.isEmpty)
+        #expect(model.state.accounts.count == 1)
+        #expect(model.state.accounts.first?.identity.workspaceID == BindingFixture.organization)
+        #expect(await vault.saves > 0)
+        #expect(await transport.requests.count == 1)
         try fixture.assertNativeUnchanged()
     }
 
-    @Test("Matching native and cached workspaces retain the existing identity without profile HTTP")
+    @Test("Even matching complete native caches require profile HTTP before first identification")
     func matchingWorkspace() async throws {
         let fixture = try BindingFixture(cachedOrganization: BindingFixture.organization)
         defer { fixture.cleanup() }
@@ -118,7 +124,9 @@ struct ClaudeReadBindingTests {
         let adapter = ClaudeProviderAdapter(authStore: fixture.store, transport: transport, loginRunner: BindingLogin())
         let imported = try await adapter.importCurrent()
         #expect(imported.account.identity.workspaceID == BindingFixture.organization)
-        #expect(await transport.requests.isEmpty)
+        #expect(await transport.requests.count == 1)
+        _ = try await adapter.importCurrent()
+        #expect(await transport.requests.count == 1)
         try fixture.assertNativeUnchanged()
     }
 
@@ -149,6 +157,10 @@ struct ClaudeReadBindingTests {
         defer { fixture.cleanup() }
         let target = try fixture.target(), backup = BindingBackup()
         let transport = BindingTransport(try fixture.profile())
+        await transport.setTargetProfile(try ProviderJSON.data([
+            "account": ["uuid": target.account.identity.userID],
+            "organization": ["uuid": target.account.identity.workspaceID]
+        ]))
         let adapter = ClaudeProviderAdapter(authStore: fixture.store, transport: transport, loginRunner: BindingLogin())
         let result = await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false,
                                                             saveLatest: { await backup.save($0) })
@@ -157,7 +169,7 @@ struct ClaudeReadBindingTests {
         #expect(source.account.identity.userID == BindingFixture.user)
         #expect(source.account.identity.workspaceID == BindingFixture.organization)
         #expect(source.credential.rawAuth == fixture.rawAuth)
-        #expect(await transport.requests.count == 1)
+        #expect(await transport.requests.count == 2)
         #expect(try ProviderAccountParser.claude(await fixture.store.read()).account.identity == target.account.identity)
         #expect(try Data(contentsOf: fixture.home.appendingPathComponent(".claude/.credentials.json")) == target.credential.rawAuth)
         let config = try ProviderJSON.object(Data(contentsOf: fixture.home.appendingPathComponent(".claude.json")))

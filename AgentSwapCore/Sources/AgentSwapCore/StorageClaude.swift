@@ -1,12 +1,20 @@
 import Foundation
 import CryptoKit
 
+private struct ClaudeRotationConfigurationSnapshot: Codable, Sendable {
+    let data: Data?
+    let sourceBinding: ClaudeCredentialIdentityBinding
+}
+
 private struct PendingClaudeRotation: Codable, Sendable {
     var credential: Credential
     var expectedRaw: Data?
     /// The exact canonical provider-store image, including authoritative shared integration values.
     var nativeAfter: Data
     var accountID: UUID
+    /// Only authenticated profile proofs may fence a stale cache by its exact bytes.
+    /// Missing means a legacy marker, which still requires the cached-identity checks.
+    var verifiedConfiguration: ClaudeRotationConfigurationSnapshot? = nil
 }
 
 /// The archive is deliberately content-addressed by the original marker.  It never becomes a
@@ -208,7 +216,10 @@ public actor ClaudeAuthStore {
         return object
     }
     private func config() throws -> [String: Any] {
-        guard let data = try files.read(configURL) else { return [:] }
+        try config(try files.read(configURL))
+    }
+    private func config(_ data: Data?) throws -> [String: Any] {
+        guard let data else { return [:] }
         let object = try authObject(data, name: "Claude 설정")
         if let oauth = object["oauthAccount"], !(oauth is [String: Any]) {
             throw AgentSwapError.unsupported("Claude oauthAccount 형식을 지원하지 않습니다.")
@@ -237,6 +248,23 @@ public actor ClaudeAuthStore {
         try validateSourceOrganization(auth, cachedAccount: cachedAccount)
         let metadata = try cachedAccount.map(authData)
         return try CredentialParser.claude(rawAuth: raw, accountMetadata: metadata)
+    }
+    /// This read supplies an unbound grant for authenticated profile identification.
+    /// The cache remains format-checked, but its user and workspace are not identity proof.
+    func readForIdentificationIfPresent() throws -> Credential? {
+        guard !(try pendingRecovery()) else {
+            throw AgentSwapError.storage("중단된 Claude 전환의 복원이 필요합니다.")
+        }
+        let config = try config()
+        guard let raw = try currentRawAuth() else { return nil }
+        _ = try validate(raw)
+        let cached = config["oauthAccount"] as? [String: Any]
+        for key in ["accountUuid", "organizationUuid"] {
+            if let value = cached?[key], !(value is String) {
+                throw AgentSwapError.unsupported("Claude 현재 계정의 식별 정보 형식을 확인하지 못했습니다.")
+            }
+        }
+        return try CredentialParser.claude(rawAuth: raw, accountMetadata: cached.map(authData))
     }
     private func validateSourceOrganization(_ auth: [String: Any], cachedAccount: [String: Any]?) throws {
         // Native login and its metadata cache are separate writes. Do not label a new workspace's
@@ -293,12 +321,15 @@ public actor ClaudeAuthStore {
             _ = try validateRotationSource(pending)
             pendingRotation = pending
         } else { pendingRotation = nil }
-        try transaction.recover(allowedLocations: allowedLocations)
+        try transaction.recover(allowedLocations: allowedLocations) {
+            if let snapshot = pendingRotation?.verifiedConfiguration { try verifyConfiguration(snapshot) }
+        }
         if let pending = pendingRotation {
             let rotated = pending.credential
             let live = try validateRotationSource(pending)
             try keychain.write(JSONEncoder().encode(rotated), service: KeychainSecretStore.service, account: pending.accountID.uuidString)
-            try persistNativeRotation(rotated, expectedRaw: live, nativeAfter: pending.nativeAfter, locks: locks)
+            try persistNativeRotation(rotated, expectedRaw: live, nativeAfter: pending.nativeAfter, locks: locks,
+                                      verifiedConfiguration: pending.verifiedConfiguration)
             try keychain.delete(service: AuthTransaction.service, account: rotationKey)
         }
     }
@@ -632,11 +663,24 @@ public actor ClaudeAuthStore {
         guard try plannedNativeRotation(pending.credential, sourceRaw: pending.expectedRaw) == pending.nativeAfter else {
             throw AgentSwapError.unsupported("토큰 갱신 복원 자료의 네이티브 인증 이미지가 일치하지 않습니다.")
         }
-        let live = try currentRawAuth(), cached = try config()["oauthAccount"] as? [String: Any]
-        if let live { try validateSourceOrganization(validate(live), cachedAccount: cached) }
-        let metadata = try cached.map(authData)
-        let identity = try cachedIdentityStatus(expectedMetadata: pending.credential.accountMetadata, cachedMetadata: metadata)
-        guard identity.matches else { throw AgentSwapError.storage("다른 Claude 계정이 활성화되어 토큰 갱신 복원을 중단했습니다.") }
+        let live = try currentRawAuth()
+        if let snapshot = pending.verifiedConfiguration {
+            var source = try CredentialParser.claude(rawAuth: requiredExpectedRaw(pending), accountMetadata: pending.credential.accountMetadata)
+            source.claudeIdentityBinding = snapshot.sourceBinding
+            guard source.verifiedClaudeAccountIdentity == (try ProviderAccountParser.claude(pending.credential).account.identity) else {
+                throw AgentSwapError.storage("Claude 갱신 복원 자료의 프로필 확인 정보가 원본 인증과 일치하지 않습니다.")
+            }
+            try verifyConfiguration(snapshot)
+            _ = try config(snapshot.data)
+            let metadata = try pending.credential.accountMetadata.map { try authObject($0, name: "Claude 확인된 계정") }
+            if let live { try validateSourceOrganization(validate(live), cachedAccount: metadata) }
+        } else {
+            let cached = try config()["oauthAccount"] as? [String: Any]
+            if let live { try validateSourceOrganization(validate(live), cachedAccount: cached) }
+            let metadata = try cached.map(authData)
+            let identity = try cachedIdentityStatus(expectedMetadata: pending.credential.accountMetadata, cachedMetadata: metadata)
+            guard identity.matches else { throw AgentSwapError.storage("다른 Claude 계정이 활성화되어 토큰 갱신 복원을 중단했습니다.") }
+        }
         guard live == pending.expectedRaw || live == pending.nativeAfter else {
             throw AgentSwapError.storage("토큰 갱신 중단 후 Claude 인증이 외부에서 변경되었습니다. 최신 인증과 복원 자료를 보존했습니다.")
         }
@@ -749,17 +793,27 @@ public actor ClaudeAuthStore {
         }
         return try claudeCLIAuthData(target)
     }
+    private func verifyConfiguration(_ snapshot: ClaudeRotationConfigurationSnapshot) throws {
+        guard try files.read(configURL) == snapshot.data else {
+            throw AgentSwapError.storage("Claude 계정 설정이 확인 이후 변경되어 인증 적용을 중단했습니다.")
+        }
+    }
     private func persistNativeRotation(_ credential: Credential, expectedRaw: Data?, nativeAfter: Data,
-                                       locks: [ProviderDirectoryLock]) throws {
+                                       locks: [ProviderDirectoryLock],
+                                       verifiedConfiguration: ClaudeRotationConfigurationSnapshot? = nil) throws {
         guard try plannedNativeRotation(credential, sourceRaw: expectedRaw) == nativeAfter else {
             throw AgentSwapError.unsupported("Claude 갱신 인증의 네이티브 저장 이미지가 일치하지 않습니다.")
         }
         let beforeKeychain = try keychain.read(service: keychainService, account: keychainAccount)
         let beforeFile = try files.read(authURL)
         guard (beforeKeychain ?? beforeFile) == expectedRaw else { throw AgentSwapError.storage("Claude 인증이 갱신 중 외부에서 변경되었습니다.") }
+        if let verifiedConfiguration { try verifyConfiguration(verifiedConfiguration) }
         var mutations = [AuthMutation(location: authLocation, before: beforeKeychain, after: nativeAfter)]
         if beforeFile != nil { mutations.append(.init(location: .file(authURL.path), before: beforeFile, after: nativeAfter)) }
-        try transaction.perform(mutations) { try locks.forEach { try $0.verify() } }
+        try transaction.perform(mutations) {
+            try locks.forEach { try $0.verify() }
+            if let verifiedConfiguration { try verifyConfiguration(verifiedConfiguration) }
+        }
     }
     /// Only the native writer's three source layouts are recoverable: Keychain-only,
     /// Keychain plus mirror, or a file-only mirror. Their location-specific before-images
@@ -779,7 +833,8 @@ public actor ClaudeAuthStore {
     }
     /// Active refresh holds Claude's own refresh locks across the HTTP exchange; inactive refresh never writes live auth.
     /// The successor is saved immediately to the same injected application Keychain before updating provider stores.
-    public func refresh(_ credential: Credential, accountID: UUID,
+    public func refresh(_ credential: Credential, accountID: UUID, verifiedNative: ImportedAccount? = nil,
+                        requiresVerifiedNative: Bool = false,
                         operation: @Sendable (Credential) async throws -> Credential) async throws -> Credential {
         guard !refreshing else { throw AgentSwapError.storage("Claude 토큰 갱신이 이미 진행 중입니다.") }
         try persistRetainedCredentials()
@@ -789,14 +844,51 @@ public actor ClaudeAuthStore {
         defer { withExtendedLifetime(locks) {} }
         guard !(try pendingRecovery()) else { throw AgentSwapError.storage("Claude 인증 복원을 완료한 뒤 갱신해 주세요.") }
         let raw = try currentRawAuth()
-        let cached = try config()["oauthAccount"] as? [String: Any]
-        // Validation must precede grant consumption even when this may be an inactive backup.
-        try validateSourceOrganization(raw.map { try validate($0) } ?? [:], cachedAccount: cached)
-        let metadata = try cached.map(authData)
-        let identity = try cachedIdentityStatus(expectedMetadata: credential.accountMetadata, cachedMetadata: metadata)
-        let current = try raw.map { try CredentialParser.claude(rawAuth: $0, accountMetadata: identity.complete ? metadata : credential.accountMetadata) }
+        let configSnapshot = try files.read(configURL)
+        let cached = try config(configSnapshot)["oauthAccount"] as? [String: Any]
+        let identity: (complete: Bool, matches: Bool)
+        let current: Credential?
+        let verifiedConfiguration: ClaudeRotationConfigurationSnapshot?
+        if let verifiedNative {
+            guard let raw, verifiedNative.account.provider == .claude,
+                  verifiedNative.credential.rawAuth == raw else {
+                throw AgentSwapError.storage("확인한 Claude 인증 세대가 변경되어 갱신을 보류했습니다.")
+            }
+            let parsed = try CredentialParser.claude(rawAuth: raw, accountMetadata: verifiedNative.credential.accountMetadata)
+            guard parsed.accessToken == verifiedNative.credential.accessToken,
+                  parsed.refreshToken == verifiedNative.credential.refreshToken,
+                  let sourceBinding = verifiedNative.credential.claudeIdentityBinding,
+                  verifiedNative.credential.verifiedClaudeAccountIdentity == verifiedNative.account.identity,
+                  try ProviderAccountParser.claude(parsed).account.identity == verifiedNative.account.identity else {
+                throw AgentSwapError.authentication("확인한 Claude 프로필과 인증 세대가 일치하지 않습니다.")
+            }
+            let metadata = try parsed.accountMetadata.map { try authObject($0, name: "Claude 확인된 계정") }
+            try validateSourceOrganization(validate(raw), cachedAccount: metadata)
+            // Even an authenticated profile cannot turn a malformed cache into writable state.
+            for key in ["accountUuid", "organizationUuid"] {
+                if let value = cached?[key], !(value is String) {
+                    throw AgentSwapError.unsupported("Claude 현재 계정의 식별 정보 형식을 확인하지 못했습니다.")
+                }
+            }
+            identity = (true, try sameIdentity(credential.accountMetadata, parsed.accountMetadata))
+            current = verifiedNative.credential
+            verifiedConfiguration = .init(data: configSnapshot, sourceBinding: sourceBinding)
+        } else {
+            guard !requiresVerifiedNative || raw == nil else {
+                throw AgentSwapError.storage("현재 Claude 인증의 프로필을 확인하지 못해 갱신을 보류했습니다.")
+            }
+            // Legacy direct-store callers retain the existing cache and exact-grant fence.
+            try validateSourceOrganization(raw.map { try validate($0) } ?? [:], cachedAccount: cached)
+            let metadata = try cached.map(authData)
+            identity = try cachedIdentityStatus(expectedMetadata: credential.accountMetadata, cachedMetadata: metadata)
+            current = try raw.map { try CredentialParser.claude(rawAuth: $0, accountMetadata: identity.complete ? metadata : credential.accountMetadata) }
+            verifiedConfiguration = nil
+        }
         let sameGrant = current.map { $0.accessToken == credential.accessToken && $0.refreshToken == credential.refreshToken } ?? false
         if sameGrant && !identity.matches {
+            if verifiedNative != nil {
+                throw AgentSwapError.storage("Claude 프로필로 확인한 인증이 저장된 계정과 달라 갱신을 중단했습니다. 두 인증을 보존했으므로 현재 로그인을 다시 확인해 주세요.")
+            }
             throw AgentSwapError.authentication("현재 Claude 인증과 계정 식별 정보가 일치하지 않아 갱신을 중단했습니다.")
         }
         if raw != nil, !identity.complete, identity.matches, !sameGrant {
@@ -826,6 +918,12 @@ public actor ClaudeAuthStore {
             try preflight.validateWrite(claudeCLIAuthData(validate(raw)), service: keychainService, account: keychainAccount)
         }
         var input = credential
+        if active, let verifiedConfiguration {
+            try verifyConfiguration(verifiedConfiguration)
+            guard try currentRawAuth() == raw else {
+                throw AgentSwapError.storage("확인한 Claude 인증 세대가 변경되어 갱신을 보류했습니다.")
+            }
+        }
         if active, let current {
             if current.accessToken != credential.accessToken || current.refreshToken != credential.refreshToken {
                 // Adopt a native rotation rather than consume the obsolete backup grant again.
@@ -838,6 +936,12 @@ public actor ClaudeAuthStore {
             locks = nil // Release provider locks before refreshing an inactive backup.
         }
         try Task.checkCancellation()
+        if active, let verifiedConfiguration {
+            try verifyConfiguration(verifiedConfiguration)
+            guard try currentRawAuth() == raw else {
+                throw AgentSwapError.storage("확인한 Claude 인증 세대가 변경되어 갱신을 보류했습니다.")
+            }
+        }
         let rotated = try await operation(input)
         _ = try validate(rotated.rawAuth)
         guard try sameIdentity(rotated.accountMetadata, credential.accountMetadata) else {
@@ -851,11 +955,13 @@ public actor ClaudeAuthStore {
         if active, let locks {
             // A forward-repair marker survives native partial failures without losing the consumed token's successor.
             let nativeAfter = try plannedNativeRotation(rotated, sourceRaw: raw)
-            let pending = PendingClaudeRotation(credential: rotated, expectedRaw: raw, nativeAfter: nativeAfter, accountID: accountID)
+            let pending = PendingClaudeRotation(credential: rotated, expectedRaw: raw, nativeAfter: nativeAfter,
+                                                accountID: accountID, verifiedConfiguration: verifiedConfiguration)
             retainedCredentials[accountID] = .init(predecessorAuth: input.rawAuth, credential: rotated, vaultData: vaultData, rotationData: try JSONEncoder().encode(pending))
             try persistRetainedCredentials()
             try keychain.write(vaultData, service: KeychainSecretStore.service, account: accountID.uuidString)
-            try persistNativeRotation(rotated, expectedRaw: raw, nativeAfter: nativeAfter, locks: locks)
+            try persistNativeRotation(rotated, expectedRaw: raw, nativeAfter: nativeAfter, locks: locks,
+                                      verifiedConfiguration: verifiedConfiguration)
             try? keychain.delete(service: AuthTransaction.service, account: rotationKey)
         } else {
             retainedCredentials[accountID] = .init(predecessorAuth: input.rawAuth, credential: rotated, vaultData: vaultData, rotationData: nil)

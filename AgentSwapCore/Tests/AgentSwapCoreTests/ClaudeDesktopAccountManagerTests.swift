@@ -345,7 +345,9 @@ struct ClaudeDesktopAccountManagerTests {
         let id = try await manager.prepareSwitch(target: f.target, registered: [f.source, f.target], currentCLI: f.source.identity)
         f.mutationProcesses.deny(onCalls: [2])
         await #expect(throws: AgentSwapError.self) { try await manager.finish(transactionID: id, cliApplied: true) }
-        #expect(f.mutationProcesses.checks.count == 3)
+        // Rollback must also recheck the boundary after restore preflight and before
+        // each write; its exact check count is independent of the restored contents.
+        #expect(f.mutationProcesses.checks.count >= 3)
         #expect(try Data(contentsOf: f.config) == configBefore)
         #expect(try Data(contentsOf: f.cookie) == cookieBefore)
     }

@@ -82,6 +82,7 @@ public final class AppModel {
             // Detect external CLI account changes without implicitly adding accounts.
             do {
                 try await flushPendingCredentials(provider)
+                await registerStoredCredentials(provider, adapter: adapter)
                 let imported = try await adapter.importCurrent()
                 if let id = state.accounts.first(where: { $0.identity == imported.account.identity })?.id {
                     do {
@@ -201,6 +202,7 @@ public final class AppModel {
         var cache = state.usage[id] ?? .init(); cache.attemptedAt = now
         do {
             try await flushPendingCredentials(account.provider)
+            await registerStoredCredentials(account.provider, adapter: adapter)
             guard var credential = try await secrets.load(accountID: id) else { throw AgentSwapError.authentication("저장된 인증이 없습니다. 다시 로그인해 주세요.") }
             var isActive = state.activeAccounts[account.provider] == id
             let running = await adapter.hasRunningConsumers()
@@ -254,6 +256,11 @@ public final class AppModel {
                     if case .pendingRelaunch(let reason) = result { pendingSwitch[.codex] = id; throw AgentSwapError.storage("새 토큰을 저장했지만 현재 Codex 인증 적용을 기다립니다: \(reason)") }
                     clearPendingRefresh(id)
                 }
+            }
+            let verifiedCredential = try await adapter.verifyCredential(credential, account: account)
+            if verifiedCredential != credential {
+                try await secrets.save(verifiedCredential, accountID: id)
+                credential = verifiedCredential
             }
             var snapshot: UsageSnapshot
             do { snapshot = try await adapter.fetchUsage(credential, account: account) }
@@ -957,6 +964,15 @@ public final class AppModel {
             return false
         }
         return true
+    }
+    private func registerStoredCredentials(_ provider: Provider, adapter: any ProviderAdapter) async {
+        guard provider == .claude else { return }
+        for account in state.accounts where account.provider == provider {
+            // An unreadable unrelated vault item must not stop the current account's read.
+            if let credential = try? await secrets.load(accountID: account.id) {
+                await adapter.registerStoredCredential(credential, account: account)
+            }
+        }
     }
     private func flushPendingCredentials(_ provider: Provider) async throws {
         if let adapter = adapters[provider] {

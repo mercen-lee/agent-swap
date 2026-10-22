@@ -162,14 +162,14 @@ struct AuthTransaction {
         }
         return true
     }
-    func recover(allowedLocations: Set<AuthMutation.Location>) throws {
+    func recover(allowedLocations: Set<AuthMutation.Location>, verifySource: () throws -> Void = {}) throws {
         // Once a native write has started, cancellation must not stop its durable rollback.
         // The native subprocess still retains its permission and elapsed-time bounds.
         try NativeSecurityCancellation.$permitsRecovery.withValue(true) {
-            try recoverIgnoringCancellation(allowedLocations: allowedLocations)
+            try recoverIgnoringCancellation(allowedLocations: allowedLocations, verifySource: verifySource)
         }
     }
-    private func recoverIgnoringCancellation(allowedLocations: Set<AuthMutation.Location>) throws {
+    private func recoverIgnoringCancellation(allowedLocations: Set<AuthMutation.Location>, verifySource: () throws -> Void) throws {
         guard let data = try keychain.read(service: Self.service, account: identifier) else { return }
         let journal = try validatedJournal(data, allowedLocations: allowedLocations)
         // The durable commit records successful verification of every location. Later CLI
@@ -179,6 +179,7 @@ struct AuthTransaction {
             try keychain.delete(service: Self.service, account: identifier)
             return
         }
+        try verifySource()
         // Never overwrite a token rotated by another process after the interruption.
         for mutation in journal.mutations {
             let current = try read(mutation.location)
@@ -189,14 +190,17 @@ struct AuthTransaction {
         // Validate every restore before changing any location: a bounded native transport
         // must never begin a rollback whose later before-image cannot be written.
         for mutation in journal.mutations { try validateWrite(mutation.before, to: mutation.location) }
+        try verifySource()
         for mutation in journal.mutations.reversed() {
             // Preflight may perform slow native helper/toolchain checks. Recheck each exact
             // generation immediately before restoring so an external login or logout that
             // occurred after the initial validation is never replaced by the old backup.
+            try verifySource()
             let current = try read(mutation.location)
             guard current == mutation.before || current == mutation.after else {
                 throw AgentSwapError.storage("복원 준비 중 인증이 외부에서 변경되었습니다. 복원 자료를 Keychain에 보존했습니다.")
             }
+            try verifySource()
             if current != mutation.before { try apply(mutation.before, to: mutation.location) }
         }
         try keychain.delete(service: Self.service, account: identifier)
@@ -251,7 +255,7 @@ struct AuthTransaction {
             // Leave the journal intact if any restore fails. Future writes stay blocked.
             do {
                 try verifyLock()
-                try recover(allowedLocations: Set(mutations.map(\.location)))
+                try recover(allowedLocations: Set(mutations.map(\.location)), verifySource: verifyLock)
             } catch {
                 throw AgentSwapError.storage("전환을 완료하지 못했고 자동 복원이 보류되었습니다. 복원 자료를 Keychain에 보존했습니다.")
             }

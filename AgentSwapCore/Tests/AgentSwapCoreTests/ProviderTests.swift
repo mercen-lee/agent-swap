@@ -130,6 +130,12 @@ private struct ProviderFixture {
             accountMetadata: ProviderJSON.data(["accountUuid": user, "organizationUuid": workspace]))
         return try ProviderAccountParser.claude(credential)
     }
+    func claudeProfile(_ account: AccountRecord) throws -> ProviderHTTPResponse {
+        .init(data: try ProviderJSON.data([
+            "account": ["uuid": account.identity.userID],
+            "organization": ["uuid": account.identity.workspaceID]
+        ]), statusCode: 200)
+    }
     func codex(token: String = "fixture-old", user: String = "fixture-user", workspace: String = "fixture-workspace") throws -> ImportedAccount {
         let claims: [String: Any] = ["sub": user, "email": "fixture@example.com", "https://api.openai.com/auth": ["chatgpt_user_id": user, "chatgpt_account_id": workspace, "chatgpt_plan_type": "pro"]]
         let encoded = try ProviderJSON.data(claims).base64EncodedString().replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
@@ -144,6 +150,17 @@ private struct ProviderFixture {
 
 @Suite("Provider wire formats and process safety")
 struct ProviderTests {
+    private func expectClaudeRefreshProof(_ requests: [URLRequest]) {
+        #expect(requests.map { $0.url?.absoluteString } == [
+            "https://api.anthropic.com/api/oauth/profile",
+            "https://platform.claude.com/v1/oauth/token",
+            "https://api.anthropic.com/api/oauth/profile"
+        ])
+        #expect(requests.map(\.httpMethod) == ["GET", "POST", "GET"])
+        #expect(requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-access")
+        #expect(requests.dropFirst().first?.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-successor")
+    }
     @Test("An optional native import distinguishes absent authentication from unreadable or malformed data", arguments: [Provider.claude, Provider.codex])
     func optionalNativeImport(_ provider: Provider) async throws {
         let fixture = try ProviderFixture(); defer { fixture.cleanup() }
@@ -296,12 +313,17 @@ struct ProviderTests {
     func claudeRefresh() async throws {
         let fixture = try ProviderFixture(); defer { fixture.cleanup() }
         let initial = try fixture.claude()
-        let transport = FixtureTransport([.init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600,"scope":"user:profile user:inference"}"#.utf8), statusCode: 200)])
+        let transport = FixtureTransport([
+            try fixture.claudeProfile(initial.account),
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600,"scope":"user:profile user:inference"}"#.utf8), statusCode: 200),
+            try fixture.claudeProfile(initial.account)
+        ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         let result = try await adapter.refresh(initial.credential, account: initial.account)
         #expect(result.accessToken == "fixture-successor")
         #expect((try ProviderJSON.object(result.rawAuth)["mcpOAuth"] as? [String: String])?["fixture"] == "preserve")
         #expect(result.expiresAt != initial.credential.expiresAt)
+        expectClaudeRefreshProof(await transport.requests)
     }
     @Test("Claude refresh uses the client ID recorded by its official login")
     func claudeStoredClientID() async throws {
@@ -311,14 +333,19 @@ struct ProviderTests {
         var oauth = try #require(root["claudeAiOauth"] as? [String: Any])
         oauth["clientId"] = "fixture-cli-client"
         root["claudeAiOauth"] = oauth; credential.rawAuth = try ProviderJSON.data(root)
-        let transport = FixtureTransport([.init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200)])
+        let transport = FixtureTransport([
+            try fixture.claudeProfile(initial.account),
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200),
+            try fixture.claudeProfile(initial.account)
+        ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         let result = try await adapter.refresh(credential, account: initial.account)
-        let request = try #require(await transport.requests.first)
+        let request = try #require(await transport.requests.dropFirst().first)
         let body = try ProviderJSON.object(#require(request.httpBody))
         #expect(body["client_id"] as? String == "fixture-cli-client")
         #expect(request.url?.host == "platform.claude.com")
         #expect((try ProviderJSON.object(result.rawAuth)["claudeAiOauth"] as? [String: Any])?["clientId"] as? String == "fixture-cli-client")
+        expectClaudeRefreshProof(await transport.requests)
     }
     @Test("The default Claude client fills absent or empty scopes with its registered native scope set", arguments: [false, true])
     func claudeDefaultRefreshScopes(_ emptyArray: Bool) async throws {
@@ -328,13 +355,18 @@ struct ProviderTests {
         var oauth = try #require(root["claudeAiOauth"] as? [String: Any])
         if emptyArray { oauth["scopes"] = [String]() } else { oauth.removeValue(forKey: "scopes") }
         root["claudeAiOauth"] = oauth; credential.rawAuth = try ProviderJSON.data(root)
-        let transport = FixtureTransport([.init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200)])
+        let transport = FixtureTransport([
+            try fixture.claudeProfile(initial.account),
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200),
+            try fixture.claudeProfile(initial.account)
+        ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         _ = try await adapter.refresh(credential, account: initial.account)
-        let request = try #require(await transport.requests.first)
+        let request = try #require(await transport.requests.dropFirst().first)
         let body = try ProviderJSON.object(#require(request.httpBody))
         #expect(body["scope"] as? String == "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins")
         #expect(body["client_id"] as? String == "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+        expectClaudeRefreshProof(await transport.requests)
     }
     @Test("Recorded Claude scopes remain authoritative for a custom client, including plugin access")
     func claudeRecordedRefreshScopes() async throws {
@@ -345,14 +377,19 @@ struct ProviderTests {
         var oauth = try #require(root["claudeAiOauth"] as? [String: Any])
         oauth["clientId"] = "fixture-recorded-client"; oauth["scopes"] = scopes
         root["claudeAiOauth"] = oauth; credential.rawAuth = try ProviderJSON.data(root)
-        let transport = FixtureTransport([.init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200)])
+        let transport = FixtureTransport([
+            try fixture.claudeProfile(initial.account),
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200),
+            try fixture.claudeProfile(initial.account)
+        ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         let result = try await adapter.refresh(credential, account: initial.account)
-        let request = try #require(await transport.requests.first)
+        let request = try #require(await transport.requests.dropFirst().first)
         let body = try ProviderJSON.object(#require(request.httpBody))
         #expect(body["scope"] as? String == scopes.joined(separator: " "))
         #expect((try ProviderJSON.object(result.rawAuth)["claudeAiOauth"] as? [String: Any])?["scopes"] as? [String] == scopes)
         #expect((try ProviderJSON.object(result.rawAuth)["mcpOAuth"] as? [String: String])?["fixture"] == "preserve")
+        expectClaudeRefreshProof(await transport.requests)
     }
     @Test("Malformed Claude refresh metadata and unknown custom grants stop before HTTP", arguments: ["string", "null", "mixed", "emptyItem", "whitespace", "control", "customAbsent", "customEmpty", "badClient", "blankClient"])
     func claudeInvalidRefreshScopes(_ shape: String) async throws {
@@ -399,12 +436,14 @@ struct ProviderTests {
             fixture.keychain.refuseReads(service: store.keychainService)
         }
         let backup = SourceBackup()
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
         guard case .failed = await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false,
                                                                     saveLatest: { await backup.save($0) }) else {
             Issue.record("Source read failure must stop before target activation"); return
         }
         #expect(await backup.value == nil)
+        #expect(await transport.requests.isEmpty)
         fixture.keychain.refuseReads(service: nil)
         if unreadable { #expect(try await store.read().accessToken == source.credential.accessToken) }
         else { #expect(try fixture.keychain.read(service: store.keychainService, account: store.keychainAccount) == nil) }
@@ -415,11 +454,20 @@ struct ProviderTests {
         let source = try fixture.claudeSwitch(), target = try fixture.claudeSwitch(token: "fixture-target", user: "00000000-0000-4000-8000-000000000030")
         let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
         try await store.activate(source.credential)
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([try fixture.claudeProfile(source.account)])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
+        let backup = SourceBackup()
         guard case .failed = await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false,
-                                                                    saveLatest: { _ in throw AgentSwapError.storage("fixture source backup failure") }) else {
+                                                                    saveLatest: { current in
+            await backup.save(current)
+            throw AgentSwapError.storage("fixture source backup failure")
+        }) else {
             Issue.record("Backup failure must stop target activation"); return
         }
+        #expect(await backup.value?.account.identity == source.account.identity)
+        #expect(await backup.value?.credential.accessToken == source.credential.accessToken)
+        #expect(await transport.requests.map { $0.url?.absoluteString } == ["https://api.anthropic.com/api/oauth/profile"])
+        #expect(await transport.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-source")
         #expect(try await store.read().accessToken == source.credential.accessToken)
     }
     @Test("Claude cancellation after the backup suspension cannot apply target authentication")
@@ -428,7 +476,8 @@ struct ProviderTests {
         let source = try fixture.claudeSwitch(), target = try fixture.claudeSwitch(token: "fixture-target", user: "00000000-0000-4000-8000-000000000030")
         let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
         try await store.activate(source.credential)
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([try fixture.claudeProfile(source.account)])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
         let barrier = ClaudeBackupBarrier()
         let task = Task { await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false,
                                                                  saveLatest: { await barrier.backup($0) }) }
@@ -436,6 +485,8 @@ struct ProviderTests {
         task.cancel()
         await barrier.release()
         guard case .failed = await task.value else { Issue.record("Cancelled activation must not apply"); return }
+        #expect(await transport.requests.map { $0.url?.absoluteString } == ["https://api.anthropic.com/api/oauth/profile"])
+        #expect(await transport.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-source")
         #expect(try await store.read().accessToken == source.credential.accessToken)
     }
     @Test("Claude detects native identity or token rotation after backup under the final store lock", arguments: [false, true])
@@ -446,12 +497,19 @@ struct ProviderTests {
         let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
         try await store.activate(source.credential)
         let backup = SourceBackup()
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([
+            try fixture.claudeProfile(source.account),
+            try fixture.claudeProfile(target.account)
+        ])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
         guard case .failed = await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false, saveLatest: { current in
             await backup.save(current)
             try await store.activate(external.credential) // Fixture for a CLI change during the backup await.
         }) else { Issue.record("Changed native generation must stop target authentication"); return }
         #expect(await backup.value?.account.identity == source.account.identity)
+        #expect(await backup.value?.credential.accessToken == source.credential.accessToken)
+        #expect(await transport.requests.map { $0.url?.absoluteString } == Array(repeating: "https://api.anthropic.com/api/oauth/profile", count: 2))
+        #expect(await transport.requests.map { $0.value(forHTTPHeaderField: "Authorization") } == ["Bearer fixture-source", "Bearer fixture-target"])
         #expect(try await store.read().accessToken == external.credential.accessToken)
     }
     @Test("Direct Claude activation can initialize a clean profile without inventing a source")
@@ -459,19 +517,23 @@ struct ProviderTests {
         let fixture = try ProviderFixture(); defer { fixture.cleanup() }
         let target = try fixture.claudeSwitch(token: "fixture-target")
         let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([try fixture.claudeProfile(target.account)])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
         guard case .applied(let text) = await adapter.activate(target.credential, account: target.account, relaunch: false) else {
             Issue.record("Explicit direct activation should initialize a clean CLI profile"); return
         }
         #expect(try await store.read().accessToken == target.credential.accessToken)
         #expect(text.contains("CLI") && text.contains("데스크톱 로그인은 별도로"))
+        #expect(await transport.requests.map { $0.url?.absoluteString } == ["https://api.anthropic.com/api/oauth/profile"])
+        #expect(await transport.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-target")
     }
     @Test("Explicit first activation proves source absence instead of inventing a backup")
     func claudeConfirmedFirstActivation() async throws {
         let fixture = try ProviderFixture(); defer { fixture.cleanup() }
         let target = try fixture.claudeSwitch(token: "fixture-target")
         let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([try fixture.claudeProfile(target.account)])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
         let backup = SourceBackup()
         guard case .applied = await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false,
                                                                      allowMissingSource: true, saveLatest: { await backup.save($0) }) else {
@@ -479,6 +541,8 @@ struct ProviderTests {
         }
         #expect(await backup.value == nil)
         #expect(try await store.read().accessToken == target.credential.accessToken)
+        #expect(await transport.requests.map { $0.url?.absoluteString } == ["https://api.anthropic.com/api/oauth/profile"])
+        #expect(await transport.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-target")
     }
     @Test("Initially unknown or appeared source is never treated as a clean first activation")
     func claudeSourcePresentInsteadOfAbsent() async throws {
@@ -501,7 +565,8 @@ struct ProviderTests {
         let source = try fixture.claudeSwitch(), target = try fixture.claudeSwitch(token: "fixture-target", user: "00000000-0000-4000-8000-000000000030")
         let store = ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain)
         fixture.keychain.appearAfterAbsentRead(service: store.keychainService, data: source.credential.rawAuth)
-        let adapter = ClaudeProviderAdapter(authStore: store, transport: FixtureTransport([]), loginRunner: NoLogin())
+        let transport = FixtureTransport([try fixture.claudeProfile(target.account)])
+        let adapter = ClaudeProviderAdapter(authStore: store, transport: transport, loginRunner: NoLogin())
         let backup = SourceBackup()
         guard case .failed = await adapter.activatePreservingSource(target.credential, account: target.account, relaunch: false,
                                                                     allowMissingSource: true, saveLatest: { await backup.save($0) }) else {
@@ -509,6 +574,8 @@ struct ProviderTests {
         }
         #expect(await backup.value == nil)
         #expect(try await store.read().accessToken == source.credential.accessToken)
+        #expect(await transport.requests.map { $0.url?.absoluteString } == ["https://api.anthropic.com/api/oauth/profile"])
+        #expect(await transport.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-target")
     }
     @Test("Running desktop requires explicit relaunch and leaves authentication intact")
     func pendingDesktop() async throws {

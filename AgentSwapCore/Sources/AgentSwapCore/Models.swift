@@ -92,6 +92,8 @@ public struct Credential: Codable, Equatable, Sendable {
     public var expiresAt: Date?
     public var rawAuth: Data
     public var accountMetadata: Data?
+    /// Authenticated identity evidence stays with the secret, never in PersistedState.
+    public var claudeIdentityBinding: ClaudeCredentialIdentityBinding?
     public init(accessToken: String, refreshToken: String? = nil, expiresAt: Date? = nil, rawAuth: Data, accountMetadata: Data? = nil) {
         self.accessToken = accessToken; self.refreshToken = refreshToken; self.expiresAt = expiresAt
         self.rawAuth = rawAuth; self.accountMetadata = accountMetadata

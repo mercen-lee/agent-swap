@@ -1,10 +1,19 @@
 import Foundation
 
 public actor ClaudeProviderAdapter: ProviderAdapter {
+    private struct VerifiedGrant: Hashable {
+        let accessToken: String
+        let refreshToken: String?
+        init(_ credential: Credential) { accessToken = credential.accessToken; refreshToken = credential.refreshToken }
+    }
     public nonisolated let provider = Provider.claude
     private let authStore: ClaudeAuthStore
     private let transport: any ProviderHTTPTransport
     private let loginRunner: any ProviderLoginRunner
+    // A profile response proves the owner of this bearer token. The bounded cache is
+    // private actor state, never a trust decision based on the CLI's account cache.
+    private var verifiedMetadata: [VerifiedGrant: Data] = [:]
+    private var verifiedTokenOrder: [VerifiedGrant] = []
     public init(authStore: ClaudeAuthStore = .init(), transport: any ProviderHTTPTransport = URLSessionProviderTransport(),
                 loginRunner: any ProviderLoginRunner = OfficialCLILoginRunner()) {
         self.authStore = authStore; self.transport = transport; self.loginRunner = loginRunner
@@ -19,19 +28,45 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     public func deletePreservedRecoveryCredentials(accountID: UUID) async throws {
         try await authStore.deletePreservedRecoveryCredentials(accountID: accountID)
     }
-    public func importCurrent() async throws -> ImportedAccount { try await identify(await authStore.read()) }
+    public func importCurrent() async throws -> ImportedAccount {
+        guard let credential = try await authStore.readForIdentificationIfPresent() else {
+            throw AgentSwapError.authentication("Claude Code에 로그인한 계정이 없습니다.")
+        }
+        return try await identifyNative(credential)
+    }
     public func importCurrentIfPresent() async throws -> ImportedAccount? {
-        guard let credential = try await authStore.readIfPresent() else { return nil }
-        return try await identify(credential)
+        guard let credential = try await authStore.readForIdentificationIfPresent() else { return nil }
+        return try await identifyNative(credential)
     }
     public func login() async throws -> ImportedAccount { try await identify(await loginRunner.login(provider: provider)) }
     public func cancelLogin() async { await loginRunner.cancel() }
     public func canOpenLoginPage() async -> Bool { await loginRunner.canOpenLoginPage() }
     public func openLoginPage() async throws { try await loginRunner.openLoginPage() }
     public func submitLoginCode(_ code: String) async throws { try await loginRunner.submitCode(code) }
+    public func registerStoredCredential(_ credential: Credential, account: AccountRecord) async {
+        guard credential.verifiedClaudeAccountIdentity == account.identity,
+              let metadata = credential.accountMetadata else { return }
+        rememberVerifiedMetadata(metadata, grant: VerifiedGrant(credential))
+    }
+    private func identifyNative(_ credential: Credential) async throws -> ImportedAccount {
+        do { return try await identify(credential) }
+        catch let error as AgentSwapError {
+            if case .authentication = error {
+                throw AgentSwapError.storage("현재 Claude 로그인 계정을 확인하지 못해 갱신을 보류했습니다. 공식 앱의 로그인을 확인한 뒤 다시 조회해 주세요.")
+            }
+            throw error
+        }
+    }
     private func identify(_ input: Credential, forceProfile: Bool = false) async throws -> ImportedAccount {
-        if !forceProfile, let account = try? ProviderAccountParser.claude(input) { return account }
+        try validateCredentialTokens(input)
         var credential = input
+        if !forceProfile, let metadata = verifiedMetadata[VerifiedGrant(input)] {
+            credential.accountMetadata = metadata
+            let account = try ProviderAccountParser.claude(credential).account
+            try validateProfileOrganization(credential, identity: account.identity)
+            credential = try credential.withVerifiedClaudeIdentity(account.identity)
+            return try ProviderAccountParser.claude(credential)
+        }
         let request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/profile", token: credential.accessToken)
         let profile = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(request)))
         guard let user = profile["account"] as? [String: Any], let org = profile["organization"] as? [String: Any],
@@ -41,17 +76,80 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         credential.accountMetadata = try ProviderJSON.data(["accountUuid": userID, "organizationUuid": orgID,
                                                           "emailAddress": user["email"] as? String ?? user["email_address"] as? String ?? "",
                                                           "organizationName": org["name"] as? String ?? ""])
+        let verifiedIdentity = try ProviderAccountParser.claude(credential).account.identity
+        try validateProfileOrganization(credential, identity: verifiedIdentity)
+        credential = try credential.withVerifiedClaudeIdentity(verifiedIdentity)
+        if let metadata = credential.accountMetadata { rememberVerifiedMetadata(metadata, grant: VerifiedGrant(input)) }
         return try ProviderAccountParser.claude(credential)
     }
-    public func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential {
-        try await authStore.refresh(credential, accountID: account.id) { input in
-            try await self.refreshToken(input, account: account)
+    private func rememberVerifiedMetadata(_ metadata: Data, grant: VerifiedGrant) {
+        verifiedMetadata[grant] = metadata
+        verifiedTokenOrder.removeAll { $0 == grant }
+        verifiedTokenOrder.append(grant)
+        if verifiedTokenOrder.count > 64 {
+            verifiedMetadata.removeValue(forKey: verifiedTokenOrder.removeFirst())
         }
     }
-    private func refreshToken(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+    private nonisolated func validateCredentialTokens(_ credential: Credential) throws {
+        let parsed = try CredentialParser.claude(rawAuth: credential.rawAuth, accountMetadata: credential.accountMetadata)
+        guard parsed.accessToken == credential.accessToken, parsed.refreshToken == credential.refreshToken else {
+            throw AgentSwapError.storage("Claude 인증의 토큰과 저장된 원본이 일치하지 않아 계정 확인을 중단했습니다.")
+        }
+    }
+    private nonisolated func validateProfileOrganization(_ credential: Credential, identity: AccountIdentity) throws {
+        if let boundOrganization = try ProviderJSON.object(credential.rawAuth)["organizationUuid"] as? String,
+           boundOrganization != identity.workspaceID {
+            throw AgentSwapError.storage("Claude 프로필과 인증의 워크스페이스가 일치하지 않아 계정 확인을 중단했습니다.")
+        }
+    }
+    private nonisolated func validateSavedIdentity(_ credential: Credential, account: AccountRecord) throws {
+        try validateCredentialTokens(credential)
+        guard account.provider == .claude,
+              let parsed = try? ProviderAccountParser.claude(credential), parsed.account.identity == account.identity else {
+            throw AgentSwapError.storage("저장된 Claude 인증과 선택한 계정의 식별 정보가 일치하지 않습니다. 현재 로그인을 다시 확인해 주세요.")
+        }
+    }
+    private func verifiedCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        try validateSavedIdentity(credential, account: account)
+        if credential.verifiedClaudeAccountIdentity == account.identity, let metadata = credential.accountMetadata {
+            rememberVerifiedMetadata(metadata, grant: VerifiedGrant(credential))
+        }
+        let verified: ImportedAccount
+        do { verified = try await identify(credential) }
+        catch let error as AgentSwapError {
+            if case .authentication = error {
+                throw AgentSwapError.storage("저장된 Claude 인증의 계정 소유자를 확인하지 못했습니다. 인증을 보존했으므로 공식 앱의 로그인 또는 새 로그인을 확인해 주세요.")
+            }
+            throw error
+        }
+        guard verified.account.identity == account.identity else {
+            throw AgentSwapError.storage("Claude 프로필로 확인한 계정이 저장된 계정과 다릅니다. 두 인증을 보존했으므로 현재 로그인을 다시 확인해 주세요.")
+        }
+        return verified.credential
+    }
+    public func verifyCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        try await verifiedCredential(credential, account: account)
+    }
+    public func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        // Reject malformed OAuth metadata without making even a profile request.
+        _ = try refreshRequestBody(credential)
+        let verifiedInput = try await verifiedCredential(credential, account: account)
+        let native: ImportedAccount?
+        if let current = try await authStore.readForIdentificationIfPresent() {
+            native = try await identifyNative(current)
+        } else { native = nil }
+        let rotated = try await authStore.refresh(verifiedInput, accountID: account.id,
+            verifiedNative: native, requiresVerifiedNative: true) { input in
+            try self.validateSavedIdentity(input, account: account)
+            return try await self.refreshToken(input, account: account)
+        }
+        // The store has already durably preserved the response before any new request.
+        return try await verifiedCredential(rotated, account: account)
+    }
+    private nonisolated func refreshRequestBody(_ credential: Credential) throws -> Data {
         guard let refresh = credential.refreshToken else { throw AgentSwapError.authentication("Claude 갱신 토큰이 없습니다. 다시 로그인하세요.") }
-        var root = try ProviderJSON.object(credential.rawAuth)
-        guard var oauth = root["claudeAiOauth"] as? [String: Any] else { throw AgentSwapError.unsupported("Claude 인증 형식이 변경되었습니다.") }
+        let root = try ProviderJSON.object(credential.rawAuth)
+        guard let oauth = root["claudeAiOauth"] as? [String: Any] else { throw AgentSwapError.unsupported("Claude 인증 형식이 변경되었습니다.") }
         let defaultClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
         let clientID: String
         if let stored = oauth["clientId"] {
@@ -79,8 +177,14 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
             // Claude Code 2.1.296's production client registers the plugins scope as well.
             scopes = ["user:profile", "user:inference", "user:sessions:claude_code", "user:mcp_servers", "user:file_upload", "user:plugins"]
         }
-        let body = try ProviderJSON.data(["grant_type": "refresh_token", "refresh_token": refresh,
-                                         "client_id": clientID, "scope": scopes.joined(separator: " ")])
+        return try ProviderJSON.data(["grant_type": "refresh_token", "refresh_token": refresh,
+                                      "client_id": clientID, "scope": scopes.joined(separator: " ")])
+    }
+    private func refreshToken(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        let body = try refreshRequestBody(credential)
+        guard let refresh = credential.refreshToken else { throw AgentSwapError.authentication("Claude 갱신 토큰이 없습니다. 다시 로그인하세요.") }
+        var root = try ProviderJSON.object(credential.rawAuth)
+        guard var oauth = root["claudeAiOauth"] as? [String: Any] else { throw AgentSwapError.unsupported("Claude 인증 형식이 변경되었습니다.") }
         let response = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(ProviderHTTP.request("https://platform.claude.com/v1/oauth/token", body: body))))
         guard let access = ProviderJSON.nonempty(response["access_token"]), let lifetime = ProviderJSON.number(response["expires_in"]), lifetime > 0 else {
             throw AgentSwapError.authentication("Claude 토큰 갱신 응답을 읽지 못했습니다.")
@@ -94,7 +198,8 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         return try CredentialParser.claude(rawAuth: ProviderJSON.data(root), accountMetadata: credential.accountMetadata)
     }
     public func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot {
-        var request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/usage", token: credential.accessToken)
+        let verified = try await verifiedCredential(credential, account: account)
+        var request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/usage", token: verified.accessToken)
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         return try ProviderUsageParser.claude(ProviderHTTP.checked(await transport.send(request)))
     }
@@ -133,9 +238,9 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     private func apply(_ credential: Credential, account: AccountRecord,
                        expectedSourceIdentity: AccountIdentity?, expectedSourceAuth: Data?, expectedSourceAbsent: Bool = false) async -> SwitchResult {
         do {
-            guard try ProviderAccountParser.claude(credential).account.identity == account.identity else { throw AgentSwapError.authentication("대상 Claude 계정의 인증 정보가 일치하지 않습니다.") }
+            let verified = try await verifiedCredential(credential, account: account)
             try Task.checkCancellation()
-            try await authStore.activate(credential, expectedSourceIdentity: expectedSourceIdentity,
+            try await authStore.activate(verified, expectedSourceIdentity: expectedSourceIdentity,
                                          expectedSourceAuth: expectedSourceAuth, expectedSourceAbsent: expectedSourceAbsent)
             return .applied(message: "Claude Code CLI 계정을 전환했습니다. Claude 데스크톱 로그인은 별도로 유지됩니다.")
         } catch { return .failed(message: error.localizedDescription) }

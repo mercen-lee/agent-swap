@@ -28,6 +28,8 @@ public protocol ProviderAdapter: Sendable {
     func importCurrent() async throws -> ImportedAccount
     /// Nil means authoritative native auth is absent; access and format errors must still throw.
     func importCurrentIfPresent() async throws -> ImportedAccount?
+    /// Restores only authenticated, grant-bound identity evidence from the private vault.
+    func registerStoredCredential(_ credential: Credential, account: AccountRecord) async
     func login() async throws -> ImportedAccount
     func cancelLogin() async
     /// A validated CLI fallback URL stays private to the runner and opens only on explicit request.
@@ -35,6 +37,8 @@ public protocol ProviderAdapter: Sendable {
     func openLoginPage() async throws
     func submitLoginCode(_ code: String) async throws
     func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential
+    /// Validates account ownership without exchanging a grant. Returned evidence is saved before usage.
+    func verifyCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential
     func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot
     func activate(_ credential: Credential, account: AccountRecord, relaunch: Bool) async -> SwitchResult
     func activatePreservingSource(_ credential: Credential, account: AccountRecord, relaunch: Bool, saveLatest: @Sendable (ImportedAccount) async throws -> Void) async -> SwitchResult
@@ -55,6 +59,8 @@ public protocol ProviderAdapter: Sendable {
 }
 
 public extension ProviderAdapter {
+    func registerStoredCredential(_ credential: Credential, account: AccountRecord) async {}
+    func verifyCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential { credential }
     func importCurrentIfPresent() async throws -> ImportedAccount? { try await importCurrent() }
     func canOpenLoginPage() async -> Bool { false }
     func openLoginPage() async throws { throw AgentSwapError.unsupported("진행 중인 로그인 페이지가 없습니다.") }

@@ -14,6 +14,7 @@ private final class RecoveryRaceKeychain: KeychainAccess, KeychainWritePreflight
     private let lock = NSLock()
     private var values: [String: Data] = [:]
     private var preflightChange: (key: String, value: Data?)?
+    private var preflightAction: (@Sendable () throws -> Void)?
     private var writes = 0
     private func key(_ service: String, _ account: String) -> String { service + "|" + account }
 
@@ -24,21 +25,71 @@ private final class RecoveryRaceKeychain: KeychainAccess, KeychainWritePreflight
     func delete(service: String, account: String) {
         lock.withLock { values.removeValue(forKey: key(service, account)); writes += 1 }
     }
-    func validateWrite(_ data: Data, service: String, account: String) {
-        lock.withLock {
-            guard let change = preflightChange, change.key == key(service, account) else { return }
-            values[change.key] = change.value
-            preflightChange = nil
+    func validateWrite(_ data: Data, service: String, account: String) throws {
+        let action = lock.withLock {
+            if let change = preflightChange, change.key == key(service, account) {
+                values[change.key] = change.value
+                preflightChange = nil
+            }
+            let action = preflightAction
+            preflightAction = nil
+            return action
         }
+        try action?()
     }
     func changeDuringPreflight(_ data: Data?, service: String, account: String) {
         lock.withLock { preflightChange = (key(service, account), data) }
     }
     func mutationCount() -> Int { lock.withLock { writes } }
+    func onNextPreflight(_ action: @escaping @Sendable () throws -> Void) {
+        lock.withLock { preflightAction = action }
+    }
 }
 
 @Suite("Recovery keeps external generations created during restore preparation")
 struct AuthTransactionRecoveryRaceTests {
+    @Test("A source configuration change during restore preflight prevents native rollback", arguments: [false, true])
+    func configurationChangeDuringPreflight(automaticRollback: Bool) throws {
+        let keychain = RecoveryRaceKeychain(), files = AtomicAuthFileAccess()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("AgentSwapRecoverySourceRace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("config.json")
+        let config = Data("fixture-original-config".utf8), changedConfig = Data("fixture-external-config".utf8)
+        try files.write(config, to: configURL)
+        let service = "fixture-native", account = "fixture-user", identifier = "fixture-source-recovery-race"
+        let before = Data("fixture-before".utf8), after = Data("fixture-after".utf8)
+        let location = AuthMutation.Location.keychain(service: service, account: account)
+        let mutations = [AuthMutation(location: location, before: before, after: after)]
+        let transaction = AuthTransaction(identifier: identifier, keychain: keychain, files: files)
+        let changeConfiguration: @Sendable () throws -> Void = { try files.write(changedConfig, to: configURL) }
+        let verifySource = {
+            guard try files.read(configURL) == config else { throw AgentSwapError.storage("Fixture source changed") }
+        }
+        if automaticRollback {
+            keychain.write(before, service: service, account: account)
+            #expect(throws: AgentSwapError.self) {
+                try transaction.perform(mutations, verifyCompletion: {
+                    keychain.onNextPreflight(changeConfiguration)
+                    throw AgentSwapError.storage("Fixture completion failure")
+                }, verifyLock: verifySource)
+            }
+        } else {
+            let marker = try JSONEncoder().encode(RecoveryRaceJournal(mutations: mutations))
+            keychain.write(after, service: service, account: account)
+            keychain.write(marker, service: AuthTransaction.service, account: identifier)
+            let writes = keychain.mutationCount()
+            keychain.onNextPreflight(changeConfiguration)
+            #expect(throws: AgentSwapError.self) {
+                try transaction.recover(allowedLocations: [location], verifySource: verifySource)
+            }
+            #expect(keychain.mutationCount() == writes)
+        }
+        #expect(keychain.read(service: service, account: account) == after)
+        #expect(try files.read(configURL) == changedConfig)
+        #expect(keychain.read(service: AuthTransaction.service, account: identifier) != nil)
+    }
+
     @Test("A native login change or logout during preflight is never restored over", arguments: [false, true])
     func externalChangeDuringPreflight(logout: Bool) throws {
         let keychain = RecoveryRaceKeychain()
