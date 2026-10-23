@@ -546,8 +546,12 @@ public final class AppModel {
             if reauthenticationTarget == nil { await self.refreshDue(force: true) }
             else if let id = reauthenticatedID, self.storageHealthy, !Task.isCancelled,
                     self.state.usage[id]?.retryAfter.map({ $0 > Date() }) != true {
-                // A dedicated reauthentication reads only this account; it never evaluates automation.
-                await self.refreshAccount(id, now: Date())
+                // A dedicated reauthentication polls only this account's usage; it never evaluates automation.
+                // The login task inherited interactive access for the selected credential.
+                // Its follow-up poll must not prompt while restoring other saved owner proofs.
+                await KeychainInteraction.$mode.withValue(.noninteractive) {
+                    await self.refreshAccount(id, now: Date())
+                }
             }
         }
     }

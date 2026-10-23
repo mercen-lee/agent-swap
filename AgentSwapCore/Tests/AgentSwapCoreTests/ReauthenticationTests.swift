@@ -9,19 +9,28 @@ private actor ReauthEventLog {
 }
 
 private actor ReauthTestVault: SecretStore {
+    struct Read: Sendable {
+        let accountID: UUID
+        let interactive: Bool
+    }
     private var values: [UUID: Credential] = [:]
     private var failure: String?
     private var unreadableNextRead = false
+    private(set) var reads: [Read] = []
+    private(set) var saveModes: [Bool] = []
     let events: ReauthEventLog
     init(events: ReauthEventLog) { self.events = events }
     func seed(_ credential: Credential, id: UUID) { values[id] = credential }
     func peek(_ id: UUID) -> Credential? { values[id] }
     func fail(_ mode: String?) { failure = mode; unreadableNextRead = false }
+    func clearAccesses() { reads.removeAll(); saveModes.removeAll() }
     func load(accountID: UUID) throws -> Credential? {
+        reads.append(.init(accountID: accountID, interactive: KeychainInteraction.mode == .interactive))
         if unreadableNextRead { unreadableNextRead = false; throw AgentSwapError.storage("Fixture readback failure") }
         return values[accountID]
     }
     func save(_ credential: Credential, accountID: UUID) async throws {
+        saveModes.append(KeychainInteraction.mode == .interactive)
         await events.append("vault-attempt:\(credential.accessToken)")
         if failure == "save" { throw AgentSwapError.storage("Fixture vault save failure") }
         values[accountID] = credential
@@ -68,6 +77,7 @@ private actor ReauthControlledProvider: ProviderAdapter {
     private(set) var independentRefreshCount = 0
     private(set) var activationCount = 0
     private(set) var usageTokens: [String] = []
+    private(set) var usageModes: [Bool] = []
     private var activation: SwitchResult = .applied(message: "Fixture explicit application")
     let vault: ReauthTestVault
     let events: ReauthEventLog
@@ -76,7 +86,7 @@ private actor ReauthControlledProvider: ProviderAdapter {
     }
     func permitNative() { nativeAvailable = true }
     func currentNative() -> ImportedAccount { native }
-    func clearCounts() { importCount = 0; activationCount = 0; refreshCount = 0; independentRefreshCount = 0; usageTokens.removeAll() }
+    func clearCounts() { importCount = 0; activationCount = 0; refreshCount = 0; independentRefreshCount = 0; usageTokens.removeAll(); usageModes.removeAll() }
     func setActivation(_ result: SwitchResult) { activation = result }
     func completeOnCancellation(_ result: ImportedAccount?) { cancelResult = result }
     func blockNextCompatibility() { holdCompatibility = true }
@@ -124,6 +134,7 @@ private actor ReauthControlledProvider: ProviderAdapter {
     }
     func fetchUsage(_ credential: Credential, account: AccountRecord) async -> UsageSnapshot {
         usageTokens.append(credential.accessToken)
+        usageModes.append(KeychainInteraction.mode == .interactive)
         #expect(await vault.peek(account.id) == credential, "The exact fresh credential must be durably saved before usage")
         await events.append("usage:\(credential.accessToken)")
         return .init(windows: [.init(id: "five_hour", title: "5시간", usedPercent: 23)])
@@ -271,6 +282,27 @@ struct ReauthenticationTests {
         let saved = try #require(events.firstIndex(of: "vault-saved:fixture-fresh-login"))
         let usage = try #require(events.firstIndex(of: "usage:fixture-fresh-login"))
         #expect(fence < saved && saved < usage)
+    }
+
+    @Test("Follow-up polling after one account's login cannot prompt for other stored accounts", arguments: Provider.allCases)
+    func postLoginPollingDoesNotInheritInteractiveAccess(_ provider: Provider) async throws {
+        let f = try await ReauthTestFixture.make(provider)
+        await f.vault.clearAccesses()
+        try await begin(f)
+        try await finish(f, expectsUsage: true)
+        let reads = await f.vault.reads
+        let selectedReadback = try #require(reads.first)
+        #expect(selectedReadback.accountID == f.old.account.id && selectedReadback.interactive)
+        #expect(await f.vault.saveModes == [true], "The selected login still owns permission to save its new credential")
+        #expect(reads.count > 1)
+        #expect(reads.dropFirst().allSatisfy { !$0.interactive }, "Polling must not inherit login's permission to display Keychain dialogs")
+        #expect(reads.filter { $0.interactive }.allSatisfy { $0.accountID == f.old.account.id })
+        if provider == .claude {
+            #expect(reads.contains { $0.accountID == f.other.account.id && !$0.interactive }, "Restoring another native owner's proof remains a noninteractive read")
+        }
+        #expect(await f.adapter.usageModes == [false])
+        #expect(await f.adapter.activationCount == 0)
+        #expect(await f.adapter.refreshCount == 0)
     }
 
     @Test("Reauthentication waits for server cooldowns and completed logins clear only local retry timers", arguments: [UsageRetryReason.localFailure, .serverRateLimit, .transientFailure])
