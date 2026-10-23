@@ -24,12 +24,12 @@ struct VaultServiceIdentity: Sendable {
 }
 
 enum FrozenVaultServiceRelease {
-    // Signed from b30507a1d0d3c28a3bc64863c91c796a5a4f48c1 in CI 39943718806.
+    // Signed from a064a28fbf9e5bc35d6d6d37ecdf3694a8725090 in CI 39947953481.
     // App updates reuse these exact signed bytes; service replacement requires a
     // separately reviewed migration rather than a normal application rebuild.
     static let identity: VaultServiceIdentity? = try? .init(
-        executableSHA256: "567ac39089e13fa71811182af55544b6c83d3546888de3f59f9a7bf92438639f",
-        cdHashes: ["dbc8d2693c9ace571fa818c0d159decee5bf00c6", "083ad9b12c2e7b5dcfa4e3a8cab08740dc60ba96"]
+        executableSHA256: "f70962412f8a9d022beb2066ac6a9042300023354c3d043ea9ad26d86c3c9265",
+        cdHashes: ["d0d3d788a60d2cf1781fe3fb452b3118496e0ae7", "a17fd9c468018a50e7fe5f563c5f6c6db63810f2"]
     )
 }
 

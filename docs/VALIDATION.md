@@ -10,6 +10,8 @@ XPC 서비스에 `JoinExistingSession`이 빠져 있었습니다. 기본 별도 
 
 보강한 서명된 프로덕션 fixture **10개**가 통과했습니다. 설정이 `true`일 때 앱과 helper는 같은 감사 보안 세션이고 둘 다 그래픽 접근이 있었습니다. `false`만 바꾼 별도 서명 control은 broker·익명 연결·ping에 성공하면서도 helper의 감사 세션이 다르고 그래픽 접근이 없었습니다. 이 control은 잘못된 서비스 요청만 보내 SDK 호출 0회를 유지했습니다. 세 서비스·변경된 부모 앱·128 MiB 실제 SDK 왕복과 정리 실패 mock 6개도 통과했고 기본 Keychain·검색 목록과 임시 자원 정리를 확인했습니다. 별도 격리 진단 7개에서는 실제 두 cdhash OR 표현의 양 순서와 sync·async·actor·detached 실행을 확인해 요구식·실행 context 자체를 원인에서 좁혔습니다. 아티팩트 회귀는 **24개**입니다.
 
+수정 후 전체 Core **531개 테스트·51개 스위트**가 7.500초에 통과했습니다. 새 고정 서비스는 소스 `a064a28fbf9e5bc35d6d6d37ecdf3694a8725090`의 [CI 39947953481](https://github.com/mercen-lee/agent-swap/actions/runs/39947953481)에서 Core·아티팩트·전체 IPC·Universal 패키징·signing Keychain 정리를 통과했습니다. 새 source SHA 이름의 ZIP·manifest만 추가했으며 기존 공개 자산 다섯 개의 metadata·digest는 그대로입니다. 공개 URL에서 받은 파일도 새 세션 설정·서명·해시·아키텍처·파일 목록 검사를 통과했습니다. 이후 앱은 이 새 pin을 사용하며 초기 거부된 구성 요소의 바이트를 수정하지 않습니다. 새 pin의 실제 Core 검사, Release 앱 빌드·deep/strict 서명·helper manifest 검사가 통과했습니다. 로컬 앱은 실행하거나 실계정에 사용하지 않았습니다.
+
 클라이언트 실패는 정적 `vault.connect`·`vault.handshake`·`vault.request` 단계와 SDK의 숫자 OSStatus만 표시합니다. 연결·형식 실패를 접근 승인 안내로 표시하지 않으며, 승인 안내는 인증 거부·상호작용 금지에만 붙입니다. 계정·데이터·NSError 본문은 진단에 넣지 않고 취소·구성 요소 검증·fallback 금지 조건을 유지합니다.
 
 조회 복구를 위해 AgentSwap만 정상 종료하고 서명된 CI 산출물과 정확히 일치하는 beta.12로 되돌렸습니다. 인증·상태는 이전 사본으로 복원하지 않았습니다. 앱에서 저장 인증 읽기와 새로고침을 실행한 뒤 등록된 여섯 계정 모두 2분 이내의 정상 응답, 오류·재시도 대기 부재를 확인했습니다. 저장소 작업의 일시적인 경합으로 남았던 Codex 한 계정도 경합 종료 후 다시 확인했습니다. 이번 설치 직전 기록한 Desktop 관련 프로세스 59개의 PID·시작 시각·실행 파일은 모두 유지됐습니다. 현재 설치본은 beta.12이며 수정된 beta.14의 실제 이행·조회는 아직 통과하지 않았습니다.
@@ -32,7 +34,7 @@ XPC 서비스에 `JoinExistingSession`이 빠져 있었습니다. 기본 별도 
 
 검증기 전체를 임시 합성 인증서로 서명한 실제 Universal XPC 파일에 실행했습니다. 프로덕션 Info.plist, 양쪽 아키텍처의 macOS 14·Hardened Runtime·무 entitlements 조건으로 `load_manifest → verify_bundle → ZIP 복원 → verify_bundle` 모두 5.64초에 통과했습니다. 실제 codesign·lipo·vtool을 사용했으며 임시 Keychain·디렉터리 삭제와 기본 Keychain·검색 목록 불변도 확인했습니다. 이 단계는 실제 배포 인증서의 최종 아티팩트 확인과 구분합니다.
 
-고정 서비스의 최종 [CI 39943718806](https://github.com/mercen-lee/agent-swap/actions/runs/39943718806)은 소스 `b30507a1d0d3c28a3bc64863c91c796a5a4f48c1`의 Core·아티팩트·서명된 IPC 검증, Universal 패키징과 signing Keychain 정리를 모두 통과했습니다. 내려받은 CI 산출물을 독립 검증한 뒤 beta.13 릴리즈에 source SHA 이름의 helper ZIP·manifest만 추가했습니다. 기존 앱 ZIP·피드·체크섬 세 자산의 ID·digest·크기·작성/수정 시각은 유지됐습니다. 서비스 소스는 beta.13 앱 태그가 아니라 manifest의 커밋·run으로 추적합니다.
+초기 고정 서비스의 [CI 39943718806](https://github.com/mercen-lee/agent-swap/actions/runs/39943718806)은 소스 `b30507a1d0d3c28a3bc64863c91c796a5a4f48c1`의 Core·아티팩트·서명된 IPC 검증, Universal 패키징과 signing Keychain 정리를 모두 통과했습니다. 내려받은 CI 산출물을 독립 검증한 뒤 beta.13 릴리즈에 source SHA 이름의 helper ZIP·manifest만 추가했습니다. 기존 앱 ZIP·피드·체크섬 세 자산의 ID·digest·크기·작성/수정 시각은 유지됐습니다. 서비스 소스는 beta.13 앱 태그가 아니라 manifest의 커밋·run으로 추적합니다.
 
 [공개 서비스 pin](../scripts/signing/vault-service-v1.json)과 실제 컴파일된 Swift pin·Wire 인증서·공개 DER의 일치를 확인했습니다. 공개 URL에서 받은 파일도 전체 manifest 검사를 통과했습니다. 실제 Core의 `FrozenVaultServiceChecker`를 그대로 컴파일한 도구가 조립한 앱의 서비스와 두 아키텍처 cdhash를 검증했습니다. 서로 다른 외부 ad-hoc 서명 두 앱에서도 helper의 정확한 파일·서명·해시가 유지됐으며 부모 앱을 실행하거나 인증 항목을 읽은 검증은 아닙니다.
 

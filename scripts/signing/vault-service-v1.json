@@ -1,35 +1,35 @@
 {
   "architectures": {
     "arm64": {
-      "cdhash": "dbc8d2693c9ace571fa818c0d159decee5bf00c6",
+      "cdhash": "d0d3d788a60d2cf1781fe3fb452b3118496e0ae7",
       "minimumOS": "14.0"
     },
     "x86_64": {
-      "cdhash": "083ad9b12c2e7b5dcfa4e3a8cab08740dc60ba96",
+      "cdhash": "a17fd9c468018a50e7fe5f563c5f6c6db63810f2",
       "minimumOS": "14.0"
     }
   },
   "archive": {
-    "name": "AgentSwapVaultService-b30507a1d0d3c28a3bc64863c91c796a5a4f48c1-universal.zip",
-    "sha256": "dbf56f99fa2fe921443e6ca829d5df0c2154dbcc6d814a111146fb1dd8672bb1",
-    "size": 76977,
-    "url": "https://github.com/mercen-lee/agent-swap/releases/download/v0.1.0-beta.13/AgentSwapVaultService-b30507a1d0d3c28a3bc64863c91c796a5a4f48c1-universal.zip"
+    "name": "AgentSwapVaultService-a064a28fbf9e5bc35d6d6d37ecdf3694a8725090-universal.zip",
+    "sha256": "e0f1183b7450ae4555cccc593e63366dfde7916a78e2ccd2c8e90caa23381fa4",
+    "size": 77100,
+    "url": "https://github.com/mercen-lee/agent-swap/releases/download/v0.1.0-beta.13/AgentSwapVaultService-a064a28fbf9e5bc35d6d6d37ecdf3694a8725090-universal.zip"
   },
   "bundleIdentifier": "net.mercen.agentswap.vault",
   "bundleName": "AgentSwapVaultService.xpc",
   "certificateSHA1": "F2C0BAD9B46BFED4130397D727F47370050DCCDB",
   "designatedRequirement": "identifier \"net.mercen.agentswap.vault\" and certificate leaf = H\"F2C0BAD9B46BFED4130397D727F47370050DCCDB\"",
   "executable": "AgentSwapVaultService",
-  "executableSHA256": "567ac39089e13fa71811182af55544b6c83d3546888de3f59f9a7bf92438639f",
+  "executableSHA256": "f70962412f8a9d022beb2066ac6a9042300023354c3d043ea9ad26d86c3c9265",
   "files": {
     "Contents/Info.plist": {
       "mode": 420,
-      "sha256": "74a303773b4223a67947003baa751462dddfc3f30d3fd1b089f25960406cc333",
-      "size": 792
+      "sha256": "16e32e7e11737081ff1a8fc60c6eace2ff8e72a4ed3c08fb1df08380fc7fc98e",
+      "size": 1009
     },
     "Contents/MacOS/AgentSwapVaultService": {
       "mode": 493,
-      "sha256": "567ac39089e13fa71811182af55544b6c83d3546888de3f59f9a7bf92438639f",
+      "sha256": "f70962412f8a9d022beb2066ac6a9042300023354c3d043ea9ad26d86c3c9265",
       "size": 327152
     },
     "Contents/_CodeSignature/CodeResources": {
@@ -39,7 +39,7 @@
     }
   },
   "protocolVersion": 1,
-  "runID": "39943718806",
+  "runID": "39947953481",
   "schemaVersion": 1,
-  "sourceCommit": "b30507a1d0d3c28a3bc64863c91c796a5a4f48c1"
+  "sourceCommit": "a064a28fbf9e5bc35d6d6d37ecdf3694a8725090"
 }
