@@ -2,7 +2,7 @@
 
 검증 기준일: 2026-10-23 · Asia/Seoul. 이 문서는 개발 중인 소스의 확인 범위를 기록합니다. **v1 완료·배포 준비를 의미하지 않습니다.** 개인 계정 정보, 인증 원문, 대화와 로컬 진단 로그는 포함하지 않습니다.
 
-## 고정 앱 인증 서비스 구현 중
+## 고정 앱 인증 서비스와 배포 구성
 
 업데이트마다 달라지는 앱 실행 파일이 Keychain의 `cdhash:` partition과 직접 연결되지 않도록 전용 XPC 서비스를 도입하고 있습니다. 계정 인증·복구 기록·Desktop 백업의 세 앱 서비스가 같은 경계를 사용합니다. 알 수 없는 항목·서비스, 다른 인증서·ad-hoc 호출자, handshake 이전 요청은 거부하며 승인 실패 뒤 SDK fallback을 하지 않습니다.
 
@@ -14,13 +14,17 @@
 
 보안 fixture 정리 실패 **6개 mock 테스트**도 hook에서 실행합니다. 한 정리 실패가 다른 임시 Keychain의 삭제 시도·metadata 감사를 건너뛰지 않으며, Security 삭제나 metadata 확인이 실패하면 등록된 DB 파일을 임의로 지우지 않고 private 작업 폴더를 보존합니다. 이 보강 뒤 일반 IPC 16개를 다시 실행해 오류 없이 정리됐고 임시 프로세스·폴더가 0개임을 확인했습니다.
 
-최종 전체 Core **525개 테스트·51개 스위트**가 5.791초에 통과했습니다. Release 앱 컴파일·deep/strict 서명 검사와 diff 검사를 통과했습니다. 이 앱 컴파일은 아직 배포 서비스가 조립되지 않은 단계이며 실행·설치하지 않았습니다.
+배포 pin 적용 후 전체 Core **525개 테스트·51개 스위트**가 7.532초에 통과했습니다. 실제 서비스 조립을 포함한 Release 앱 빌드·외부 서명 후 helper manifest 검사·deep/strict 검증과 diff 검사가 통과했습니다. 로컬 ad-hoc 앱은 실행·설치하지 않았습니다.
 
 공개 전 CI의 Core·IPC 보안 검증은 통과했으나 패키지 검증기의 `codesign` 인자와 DR 출력 비교 오류로 중단됐습니다. inline 요구사항의 `=` prefix, 인증서 추출의 attached 인자, H"hex" 내부만의 대소문자 정규화를 반영했습니다. ID·연산자·추가 OR 조건은 계속 정확히 비교합니다. source pin의 nil·중복·불일치·주석 decoy 거부와 명령 회귀를 포함해 아티팩트 합성 테스트 **23개**가 통과했습니다. 실패한 CI에서 설치 앱·실계정은 변경하지 않았고 임시 signing Keychain 정리는 성공했습니다.
 
 검증기 전체를 임시 합성 인증서로 서명한 실제 Universal XPC 파일에 실행했습니다. 프로덕션 Info.plist, 양쪽 아키텍처의 macOS 14·Hardened Runtime·무 entitlements 조건으로 `load_manifest → verify_bundle → ZIP 복원 → verify_bundle` 모두 5.64초에 통과했습니다. 실제 codesign·lipo·vtool을 사용했으며 임시 Keychain·디렉터리 삭제와 기본 Keychain·검색 목록 불변도 확인했습니다. 이 단계는 실제 배포 인증서의 최종 아티팩트 확인과 구분합니다.
 
-현재 설치본은 아래에서 복구한 beta.12 그대로입니다. 새 서비스의 단회 CI 서명·아티팩트 고정·패키징 통합과 실제 설치 이행·새 조회는 아직 수행하지 않았습니다. 새 서비스가 기존 항목에 처음 접근할 때 항목별 사용자 승인이 필요할 수 있으며, 이를 이미 끝난 것으로 표시하지 않습니다. 실제 Desktop 세션과 계정 인증은 이 개발 검증에 사용하지 않았습니다.
+고정 서비스의 최종 [CI 39943718806](https://github.com/mercen-lee/agent-swap/actions/runs/39943718806)은 소스 `b30507a1d0d3c28a3bc64863c91c796a5a4f48c1`의 Core·아티팩트·서명된 IPC 검증, Universal 패키징과 signing Keychain 정리를 모두 통과했습니다. 내려받은 CI 산출물을 독립 검증한 뒤 beta.13 릴리즈에 source SHA 이름의 helper ZIP·manifest만 추가했습니다. 기존 앱 ZIP·피드·체크섬 세 자산의 ID·digest·크기·작성/수정 시각은 유지됐습니다. 서비스 소스는 beta.13 앱 태그가 아니라 manifest의 커밋·run으로 추적합니다.
+
+[공개 서비스 pin](../scripts/signing/vault-service-v1.json)과 실제 컴파일된 Swift pin·Wire 인증서·공개 DER의 일치를 확인했습니다. 공개 URL에서 받은 파일도 전체 manifest 검사를 통과했습니다. 실제 Core의 `FrozenVaultServiceChecker`를 그대로 컴파일한 도구가 조립한 앱의 서비스와 두 아키텍처 cdhash를 검증했습니다. 서로 다른 외부 ad-hoc 서명 두 앱에서도 helper의 정확한 파일·서명·해시가 유지됐으며 부모 앱을 실행하거나 인증 항목을 읽은 검증은 아닙니다.
+
+현재 설치본은 아래에서 복구한 beta.12 그대로입니다. 실제 설치 이행·새 조회는 아직 수행하지 않았습니다. 새 서비스가 기존 항목에 처음 접근할 때 항목별 사용자 승인이 필요할 수 있으며, 이를 이미 끝난 것으로 표시하지 않습니다. 실제 Desktop 세션과 계정 인증은 이 개발 검증에 사용하지 않았습니다.
 
 ## beta.13 재로그인 뒤 반복 Keychain 승인
 

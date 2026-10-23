@@ -4,6 +4,17 @@ set -euo pipefail
 AGENTSWAP_ROOT="${0:A:h:h}"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
+# A normal app build must contain the frozen service. Bootstrap-only source
+# commits intentionally cannot produce a new app until its public pin is ready.
+AGENTSWAP_VAULT_PIN="$AGENTSWAP_ROOT/scripts/signing/vault-service-v1.json"
+[[ -f "$AGENTSWAP_VAULT_PIN" && ! -L "$AGENTSWAP_VAULT_PIN" ]] || {
+  print -u2 -r -- 'The reviewed frozen vault service pin is required before building an app.'
+  exit 1
+}
+/usr/bin/python3 "$AGENTSWAP_ROOT/scripts/fetch-vault-service.py" \
+    --pin "$AGENTSWAP_VAULT_PIN" \
+    --verify-source-pin "$AGENTSWAP_ROOT/AgentSwapCore/Sources/AgentSwapCore/AppVaultTransport.swift"
+
 # Keep a developer-machine signing choice out of source control. An explicitly
 # supplied environment value (including "-") always takes precedence.
 if [[ -n "${AGENTSWAP_SIGN_IDENTITY+x}" ]]; then
@@ -47,17 +58,21 @@ xcodebuild \
   CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
   build
 
-if [[ "$AGENTSWAP_RESOLVED_SIGN_IDENTITY" != "-" ]]; then
-  /usr/bin/codesign \
-    --force \
-    --deep \
-    --options runtime \
-    --preserve-metadata=entitlements \
-    --sign "$AGENTSWAP_RESOLVED_SIGN_IDENTITY" \
-    --timestamp=none \
-    "$AGENTSWAP_PRODUCT"
-fi
+# DerivedData is a nonrunning staging product. The installer verifies the
+# frozen nested code before the outer signature is replaced, including ad-hoc
+# builds. Never use --deep while signing: that would replace the service identity.
+"$AGENTSWAP_ROOT/scripts/install-vault-service.sh" "$AGENTSWAP_VAULT_PIN" "$AGENTSWAP_PRODUCT"
+/usr/bin/codesign \
+  --force \
+  --options runtime \
+  --preserve-metadata=entitlements \
+  --sign "$AGENTSWAP_RESOLVED_SIGN_IDENTITY" \
+  --timestamp=none \
+  "$AGENTSWAP_PRODUCT"
 /usr/bin/codesign --verify --deep --strict "$AGENTSWAP_PRODUCT"
+/usr/bin/python3 "$AGENTSWAP_ROOT/scripts/fetch-vault-service.py" \
+  --pin "$AGENTSWAP_VAULT_PIN" \
+  --verify-bundle "$AGENTSWAP_PRODUCT/Contents/XPCServices/AgentSwapVaultService.xpc"
 
 AGENTSWAP_INSTALLED_EXECUTABLE="$AGENTSWAP_ROOT/build/AgentSwap.app/Contents/MacOS/AgentSwap"
 while IFS= read -r AGENTSWAP_RUNNING_EXECUTABLE; do
@@ -70,4 +85,8 @@ done < <(/bin/ps -ww -axo comm=)
 
 mkdir -p "$AGENTSWAP_ROOT/build"
 ditto "$AGENTSWAP_PRODUCT" "$AGENTSWAP_ROOT/build/AgentSwap.app"
+/usr/bin/codesign --verify --deep --strict "$AGENTSWAP_ROOT/build/AgentSwap.app"
+/usr/bin/python3 "$AGENTSWAP_ROOT/scripts/fetch-vault-service.py" \
+  --pin "$AGENTSWAP_VAULT_PIN" \
+  --verify-bundle "$AGENTSWAP_ROOT/build/AgentSwap.app/Contents/XPCServices/AgentSwapVaultService.xpc"
 echo "Built: $AGENTSWAP_ROOT/build/AgentSwap.app"

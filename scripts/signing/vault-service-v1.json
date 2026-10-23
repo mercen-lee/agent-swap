@@ -1,0 +1,45 @@
+{
+  "architectures": {
+    "arm64": {
+      "cdhash": "dbc8d2693c9ace571fa818c0d159decee5bf00c6",
+      "minimumOS": "14.0"
+    },
+    "x86_64": {
+      "cdhash": "083ad9b12c2e7b5dcfa4e3a8cab08740dc60ba96",
+      "minimumOS": "14.0"
+    }
+  },
+  "archive": {
+    "name": "AgentSwapVaultService-b30507a1d0d3c28a3bc64863c91c796a5a4f48c1-universal.zip",
+    "sha256": "dbf56f99fa2fe921443e6ca829d5df0c2154dbcc6d814a111146fb1dd8672bb1",
+    "size": 76977,
+    "url": "https://github.com/mercen-lee/agent-swap/releases/download/v0.1.0-beta.13/AgentSwapVaultService-b30507a1d0d3c28a3bc64863c91c796a5a4f48c1-universal.zip"
+  },
+  "bundleIdentifier": "net.mercen.agentswap.vault",
+  "bundleName": "AgentSwapVaultService.xpc",
+  "certificateSHA1": "F2C0BAD9B46BFED4130397D727F47370050DCCDB",
+  "designatedRequirement": "identifier \"net.mercen.agentswap.vault\" and certificate leaf = H\"F2C0BAD9B46BFED4130397D727F47370050DCCDB\"",
+  "executable": "AgentSwapVaultService",
+  "executableSHA256": "567ac39089e13fa71811182af55544b6c83d3546888de3f59f9a7bf92438639f",
+  "files": {
+    "Contents/Info.plist": {
+      "mode": 420,
+      "sha256": "74a303773b4223a67947003baa751462dddfc3f30d3fd1b089f25960406cc333",
+      "size": 792
+    },
+    "Contents/MacOS/AgentSwapVaultService": {
+      "mode": 493,
+      "sha256": "567ac39089e13fa71811182af55544b6c83d3546888de3f59f9a7bf92438639f",
+      "size": 327152
+    },
+    "Contents/_CodeSignature/CodeResources": {
+      "mode": 420,
+      "sha256": "6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b",
+      "size": 2200
+    }
+  },
+  "protocolVersion": 1,
+  "runID": "39943718806",
+  "schemaVersion": 1,
+  "sourceCommit": "b30507a1d0d3c28a3bc64863c91c796a5a4f48c1"
+}

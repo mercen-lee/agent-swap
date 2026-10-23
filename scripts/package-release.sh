@@ -27,6 +27,11 @@ AGENTSWAP_SPARKLE_PRIVATE_KEY="${SPARKLE_PRIVATE_KEY:-}"
 unset SPARKLE_PRIVATE_KEY
 
 AGENTSWAP_ROOT="${0:A:h:h}"
+AGENTSWAP_VAULT_PIN="$AGENTSWAP_ROOT/scripts/signing/vault-service-v1.json"
+[[ -f "$AGENTSWAP_VAULT_PIN" && ! -L "$AGENTSWAP_VAULT_PIN" ]] || fail "The reviewed frozen vault service pin is required before packaging an app."
+/usr/bin/python3 "$AGENTSWAP_ROOT/scripts/fetch-vault-service.py" \
+    --pin "$AGENTSWAP_VAULT_PIN" \
+    --verify-source-pin "$AGENTSWAP_ROOT/AgentSwapCore/Sources/AgentSwapCore/AppVaultTransport.swift"
 [[ "$AGENTSWAP_ROOT" != *$'\n'* && "$AGENTSWAP_ROOT" != *$'\r'* ]] || fail "The workspace path cannot contain line breaks."
 AGENTSWAP_RELEASE_WORK_ROOT="$AGENTSWAP_ROOT/build/ReleasePackage"
 AGENTSWAP_RELEASE_OUTPUT_ROOT="$AGENTSWAP_ROOT/build/releases"
@@ -151,6 +156,9 @@ AGENTSWAP_RELEASE_STAGING="$AGENTSWAP_RELEASE_WORK_DIR/staging"
 /bin/mkdir "$AGENTSWAP_RELEASE_STAGING"
 AGENTSWAP_RELEASE_APP="$AGENTSWAP_RELEASE_STAGING/AgentSwap.app"
 /usr/bin/ditto "$AGENTSWAP_RELEASE_WORK_DIR/DerivedData/Build/Products/Release/AgentSwap.app" "$AGENTSWAP_RELEASE_APP"
+# Assemble the already signed service before the outer app is signed. Its own
+# file hashes, certificate, designated requirement and both cdhashes are pinned.
+"$AGENTSWAP_ROOT/scripts/install-vault-service.sh" "$AGENTSWAP_VAULT_PIN" "$AGENTSWAP_RELEASE_APP"
 AGENTSWAP_BUNDLE_PLIST="$AGENTSWAP_RELEASE_APP/Contents/Info.plist"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$AGENTSWAP_BUNDLE_PLIST")" == net.mercen.agentswap ]] || fail "Unexpected bundle identifier."
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$AGENTSWAP_BUNDLE_PLIST")" == "$AGENTSWAP_BUNDLE_VERSION" ]] || fail "Unexpected bundle version."
@@ -179,6 +187,9 @@ TZ=UTC /usr/bin/find "$AGENTSWAP_RELEASE_APP" -exec /usr/bin/touch -h -t "$AGENT
     --timestamp=none "$AGENTSWAP_RELEASE_APP"
 /usr/bin/codesign --verify --deep --strict "$AGENTSWAP_RELEASE_APP"
 "$AGENTSWAP_RELEASE_SIGNING_HELPER" verify "$AGENTSWAP_RELEASE_APP" "$AGENTSWAP_RELEASE_CERTIFICATE"
+/usr/bin/python3 "$AGENTSWAP_ROOT/scripts/fetch-vault-service.py" \
+    --pin "$AGENTSWAP_VAULT_PIN" \
+    --verify-bundle "$AGENTSWAP_RELEASE_APP/Contents/XPCServices/AgentSwapVaultService.xpc"
 /usr/bin/codesign --display --entitlements :- "$AGENTSWAP_RELEASE_APP" 2>/dev/null | /usr/bin/python3 -c '
 import plistlib, sys
 entitlements = plistlib.loads(sys.stdin.buffer.read())

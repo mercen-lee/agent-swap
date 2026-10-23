@@ -24,9 +24,13 @@ struct VaultServiceIdentity: Sendable {
 }
 
 enum FrozenVaultServiceRelease {
-    // Populated only after the once-built service artifact has been independently
-    // verified. An unpublished or missing pin must fail closed, never use the SDK.
-    static var identity: VaultServiceIdentity? { nil }
+    // Signed from b30507a1d0d3c28a3bc64863c91c796a5a4f48c1 in CI 39943718806.
+    // App updates reuse these exact signed bytes; service replacement requires a
+    // separately reviewed migration rather than a normal application rebuild.
+    static let identity: VaultServiceIdentity? = try? .init(
+        executableSHA256: "567ac39089e13fa71811182af55544b6c83d3546888de3f59f9a7bf92438639f",
+        cdHashes: ["dbc8d2693c9ace571fa818c0d159decee5bf00c6", "083ad9b12c2e7b5dcfa4e3a8cab08740dc60ba96"]
+    )
 }
 
 protocol VaultServiceChecking: Sendable {
