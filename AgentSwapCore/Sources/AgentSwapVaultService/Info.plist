@@ -13,6 +13,9 @@
     <dict>
         <key>ServiceType</key><string>Application</string>
         <key>RunLoopType</key><string>dispatch_main</string>
+        <!-- XPC otherwise creates a new security session. Apple's XPC guide and
+             xpcservice.plist(5) require joining the caller for user Keychain access. -->
+        <key>JoinExistingSession</key><true/>
     </dict>
 </dict>
 </plist>

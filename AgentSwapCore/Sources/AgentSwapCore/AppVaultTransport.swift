@@ -52,7 +52,7 @@ struct FrozenVaultServiceChecker: VaultServiceChecking {
         var info = stat()
         guard lstat(executable.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
               info.st_size > 0, info.st_size <= 64 * 1_024 * 1_024 else { throw vaultComponentFailure() }
-        let bytes = try Data(contentsOf: executable)
+        guard let bytes = try? Data(contentsOf: executable) else { throw vaultComponentFailure() }
         guard SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == identity.executableSHA256 else {
             throw vaultComponentFailure()
         }
@@ -93,20 +93,24 @@ struct AuthenticatedAppVaultTransport: AppVaultTransport {
 
     func perform(service: String = AgentSwapVaultWire.service, operation: String, account: String, data: Data?, interactionAllowed: Bool) throws -> AppVaultReply {
         let deadline = ProcessInfo.processInfo.systemUptime + (interactionAllowed ? 120 : 30)
-        let identity = try checker.validate()
-        let session = try sessions.open(peerRequirement: identity.peerRequirement, deadline: deadline)
+        let identity = try checkedVaultIdentity(checker)
+        let session = try withVaultStage(.connect) {
+            try sessions.open(peerRequirement: identity.peerRequirement, deadline: deadline)
+        }
         defer { session.invalidate() }
         var random = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, random.count, &random) == errSecSuccess else { throw appVaultFailure() }
+        guard SecRandomCopyBytes(kSecRandomDefault, random.count, &random) == errSecSuccess else { throw appVaultFailure(.handshake) }
         let nonce = Data(random)
-        let handshake = try session.ping(nonce, deadline: deadline)
+        let handshake = try withVaultStage(.handshake) { try session.ping(nonce, deadline: deadline) }
         // XPC authenticates incoming messages, not the first outgoing request.
         // Only a verified harmless reply permits sending a credential payload.
         guard handshake.version == AgentSwapVaultWire.version, handshake.nonce == nonce,
-              handshake.peerUserID == getuid() else { throw appVaultFailure() }
+              handshake.peerUserID == getuid() else { throw appVaultFailure(.handshake) }
         try checkVaultRequest(deadline: deadline)
-        return try session.execute(service: service, operation: operation, account: account, data: data,
-                                   interactionAllowed: interactionAllowed, deadline: deadline)
+        return try withVaultStage(.request) {
+            try session.execute(service: service, operation: operation, account: account, data: data,
+                                interactionAllowed: interactionAllowed, deadline: deadline)
+        }
     }
 }
 
@@ -119,14 +123,14 @@ struct XPCVaultSessionFactory: VaultSessionCreating {
         broker.resume()
         var completed = false
         defer { if !completed { broker.invalidate() } }
-        let waiter = VaultXPCWaiter<NSXPCListenerEndpoint>()
+        let waiter = VaultXPCWaiter<NSXPCListenerEndpoint>(stage: .connect)
         installFailures(broker, waiter: waiter)
         guard let proxy = broker.remoteObjectProxyWithErrorHandler({ _ in waiter.reject() }) as? any AgentSwapVaultBroker else {
-            throw appVaultFailure()
+            throw appVaultFailure(.connect)
         }
         proxy.connect { waiter.accept($0) }
         let endpoint = try waiter.wait(deadline: deadline)
-        guard broker.effectiveUserIdentifier == getuid() else { throw appVaultFailure() }
+        guard broker.effectiveUserIdentifier == getuid() else { throw appVaultFailure(.connect) }
         // Named services may reconnect automatically. They NEVER carry secrets.
         // The credential endpoint is bound to this particular service process;
         // process death leaves a dead endpoint, not a new service-name lookup.
@@ -149,10 +153,10 @@ private final class XPCVaultCredentialSession: VaultCredentialSession, @unchecke
     deinit { invalidate() }
 
     func ping(_ nonce: Data, deadline: TimeInterval) throws -> VaultHandshake {
-        let waiter = VaultXPCWaiter<VaultHandshake>()
+        let waiter = VaultXPCWaiter<VaultHandshake>(stage: .handshake)
         installFailures(connection, waiter: waiter)
         guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in waiter.reject() }) as? any AgentSwapVaultRPC else {
-            throw appVaultFailure()
+            throw appVaultFailure(.handshake)
         }
         proxy.ping(nonce) { [self] version, echo in
             waiter.accept(.init(version: version, nonce: echo, peerUserID: self.connection.effectiveUserIdentifier))
@@ -162,7 +166,7 @@ private final class XPCVaultCredentialSession: VaultCredentialSession, @unchecke
 
     func execute(service: String, operation: String, account: String, data: Data?, interactionAllowed: Bool, deadline: TimeInterval) throws -> AppVaultReply {
         try checkVaultRequest(deadline: deadline)
-        let waiter = VaultXPCWaiter<AppVaultReply>()
+        let waiter = VaultXPCWaiter<AppVaultReply>(stage: .request)
         installFailures(connection, waiter: waiter)
         guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in waiter.reject() }) as? any AgentSwapVaultRPC else {
             throw appVaultFailure()
@@ -194,10 +198,12 @@ private func installFailures<Value>(_ connection: NSXPCConnection, waiter: Vault
 /// A callback owns its value until the synchronous Keychain boundary resumes.
 /// All mutable state is protected and late/double replies are ignored.
 private final class VaultXPCWaiter<Value>: @unchecked Sendable {
+    private let stage: AppVaultFailureStage
     private let lock = NSLock()
     private let ready = DispatchSemaphore(value: 0)
     private var completed = false
     private var value: Value?
+    init(stage: AppVaultFailureStage) { self.stage = stage }
     func accept(_ value: Value) { finish(value) }
     func reject() { finish(nil) }
     private func finish(_ result: Value?) {
@@ -211,19 +217,39 @@ private final class VaultXPCWaiter<Value>: @unchecked Sendable {
     }
     func wait(deadline: TimeInterval) throws -> Value {
         while true {
-            try checkVaultRequest(deadline: deadline)
+            try checkVaultRequest(deadline: deadline, stage: stage)
             if ready.wait(timeout: .now() + 0.025) == .success {
-                try checkVaultRequest(deadline: deadline)
-                guard let result = lock.withLock({ value }) else { throw appVaultFailure() }
+                try checkVaultRequest(deadline: deadline, stage: stage)
+                guard let result = lock.withLock({ value }) else { throw appVaultFailure(stage) }
                 return result
             }
         }
     }
 }
 
-func checkVaultRequest(deadline: TimeInterval) throws {
+func checkVaultRequest(deadline: TimeInterval, stage: AppVaultFailureStage = .request) throws {
     if !NativeSecurityCancellation.permitsRecovery { try Task.checkCancellation() }
-    guard ProcessInfo.processInfo.systemUptime < deadline else { throw appVaultFailure() }
+    guard ProcessInfo.processInfo.systemUptime < deadline else { throw appVaultFailure(stage) }
+}
+
+private func withVaultStage<Value>(_ stage: AppVaultFailureStage, operation: () throws -> Value) throws -> Value {
+    do { return try operation() }
+    catch is CancellationError { throw CancellationError() }
+    catch let error as AgentSwapError {
+        if case .cancelled = error { throw error }
+        throw appVaultFailure(stage)
+    } catch { throw appVaultFailure(stage) }
+}
+
+private func checkedVaultIdentity(_ checker: any VaultServiceChecking) throws -> VaultServiceIdentity {
+    do { return try checker.validate() }
+    catch is CancellationError { throw CancellationError() }
+    catch let error as AgentSwapError {
+        switch error {
+        case .unsupported, .cancelled: throw error
+        default: throw vaultComponentFailure()
+        }
+    } catch { throw vaultComponentFailure() }
 }
 
 private func vaultComponentFailure() -> AgentSwapError {

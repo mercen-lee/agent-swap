@@ -31,6 +31,10 @@ struct FixtureClientMain {
             guard CommandLine.arguments.count == 3 else { throw FixtureFailure.invalidArguments }
             let requirement = CommandLine.arguments[1]
             let mode = CommandLine.arguments[2]
+            var securitySession: SecuritySessionId = noSecuritySession
+            var sessionAttributes: SessionAttributeBits = []
+            let sessionStatus = SessionGetInfo(callerSecuritySession, &securitySession, &sessionAttributes)
+            guard sessionStatus == errSecSuccess, securitySession != noSecuritySession else { throw FixtureFailure.handshake }
             let deadline = ProcessInfo.processInfo.systemUptime + (mode == "large" ? 120 : 12)
             stage = "opening"
             let session = try XPCVaultSessionFactory().open(peerRequirement: requirement, deadline: deadline)
@@ -77,7 +81,7 @@ struct FixtureClientMain {
                     }
                 }
             }
-            print("{\"parent_generation\":\(parentGeneration),\"passed\":true,\"pid\":\(getpid()),\"mode\":\"\(mode)\"}")
+            print("{\"parent_generation\":\(parentGeneration),\"passed\":true,\"pid\":\(getpid()),\"mode\":\"\(mode)\",\"securitySessionStatus\":\(sessionStatus),\"securitySessionID\":\(securitySession),\"securitySessionAttributes\":\(sessionAttributes.rawValue)}")
         } catch {
             // Synthetic errors contain no credentials; keep logs bounded and do
             // not print dynamic requirement strings, paths, or data.

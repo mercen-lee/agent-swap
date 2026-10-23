@@ -45,8 +45,13 @@ final class RecordingBackend: VaultKeychainBackend, @unchecked Sendable {
 struct FixtureServerMain {
     static func main() {
         guard SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else { exit(2) }
+        var securitySession: SecuritySessionId = noSecuritySession
+        var sessionAttributes: SessionAttributeBits = []
+        let sessionStatus = SessionGetInfo(callerSecuritySession, &securitySession, &sessionAttributes)
         func startup(_ stage: String, status: OSStatus = errSecSuccess) {
-            let row: [String: Any] = ["stage": stage, "status": status, "pid": getpid()]
+            let row: [String: Any] = ["stage": stage, "status": status, "pid": getpid(),
+                                      "securitySessionID": securitySession,
+                                      "securitySessionAttributes": sessionAttributes.rawValue]
             var data = (try? JSONSerialization.data(withJSONObject: row)) ?? Data()
             data.append(0x0a)
             let path = FixtureConfiguration.eventPath + ".startup"
@@ -54,6 +59,8 @@ struct FixtureServerMain {
             if descriptor >= 0 { _ = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }; close(descriptor) }
         }
         startup("launch")
+        startup("security-session", status: sessionStatus)
+        guard sessionStatus == errSecSuccess, securitySession != noSecuritySession else { exit(3) }
         var keychain: SecKeychain?
         let status: OSStatus
         if FileManager.default.fileExists(atPath: FixtureConfiguration.keychainPath) {

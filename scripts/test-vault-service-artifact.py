@@ -36,7 +36,7 @@ class ArtifactValidationTests(unittest.TestCase):
                 "CFBundleIdentifier": ARTIFACT.IDENTIFIER, "CFBundleExecutable": ARTIFACT.EXECUTABLE,
                 "CFBundleName": "AgentSwap Vault", "CFBundleShortVersionString": "1.0",
                 "CFBundlePackageType": "XPC!", "CFBundleVersion": "1", "LSMinimumSystemVersion": "14.0",
-                "XPCService": {"ServiceType": "Application", "RunLoopType": "dispatch_main"},
+                "XPCService": {"ServiceType": "Application", "RunLoopType": "dispatch_main", "JoinExistingSession": True},
             }),
             "Contents/MacOS/AgentSwapVaultService": b"synthetic-executable-bytes-not-signed\0\xff",
             "Contents/_CodeSignature/CodeResources": plistlib.dumps({"synthetic": True}),
@@ -213,6 +213,22 @@ class ArtifactValidationTests(unittest.TestCase):
         bundle = self.extract()
         with self.assertRaisesRegex(ValueError, "XPC bundle metadata"):
             ARTIFACT.verify_files(bundle, self.pin)
+
+    def test_missing_false_and_nonboolean_session_join_are_rejected(self):
+        bundle = self.extract()
+        original = plistlib.loads(self.contents["Contents/Info.plist"])
+        for value in (None, False, 0, 1, "true", "false", []):
+            with self.subTest(value=value):
+                info = copy.deepcopy(original)
+                if value is None:
+                    info["XPCService"].pop("JoinExistingSession")
+                else:
+                    info["XPCService"]["JoinExistingSession"] = value
+                data = plistlib.dumps(info)
+                (bundle / "Contents/Info.plist").write_bytes(data)
+                self.pin["files"]["Contents/Info.plist"].update(sha256=ARTIFACT.sha256(data), size=len(data))
+                with self.assertRaisesRegex(ValueError, "explicitly join"):
+                    ARTIFACT.verify_files(bundle, self.pin)
 
     def test_bundle_tamper_and_extra_file_rejected(self):
         bundle = self.extract()

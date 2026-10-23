@@ -232,10 +232,16 @@ def verify_files(bundle, pin):
         seen.add(name)
     require(seen == FILES, "incomplete vault bundle")
     info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+    require(isinstance(info, dict), "unexpected XPC bundle metadata")
+    settings = info.get("XPCService")
+    # A new XPC security session cannot stand in for the caller's login session.
+    # Identity testing also rejects integers, which compare equal to Python bools.
+    require(isinstance(settings, dict) and settings.get("JoinExistingSession") is True,
+            "XPC service must explicitly join the caller's security session")
     expected = {"CFBundleIdentifier": IDENTIFIER, "CFBundleExecutable": EXECUTABLE,
                 "CFBundleName": "AgentSwap Vault", "CFBundleShortVersionString": "1.0",
                 "CFBundlePackageType": "XPC!", "CFBundleVersion": "1",
-                "LSMinimumSystemVersion": "14.0", "XPCService": {"ServiceType": "Application", "RunLoopType": "dispatch_main"}}
+                "LSMinimumSystemVersion": "14.0", "XPCService": {"ServiceType": "Application", "RunLoopType": "dispatch_main", "JoinExistingSession": True}}
     require(info == expected, "unexpected XPC bundle metadata")
 
 

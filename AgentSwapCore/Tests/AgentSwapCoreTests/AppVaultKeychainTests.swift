@@ -4,12 +4,38 @@ import Testing
 @testable import AgentSwapCore
 import AgentSwapVaultProtocol
 
+private let vaultSecretMarker = "SYNTHETIC_VAULT_PRIVATE_MARKER"
+private func arbitraryVaultError() -> NSError {
+    NSError(domain: vaultSecretMarker + ".domain", code: 123,
+            userInfo: [NSLocalizedDescriptionKey: vaultSecretMarker + ".description",
+                       "account": vaultSecretMarker + ".account", "service": vaultSecretMarker + ".service",
+                       "data": Data(vaultSecretMarker.utf8)])
+}
+
+private func vaultFailureMessage(_ operation: () throws -> Void) -> String {
+    do {
+        try operation()
+        Issue.record("Expected a bounded vault failure")
+        return ""
+    } catch let error as AgentSwapError {
+        return error.localizedDescription
+    } catch {
+        Issue.record("Unexpected vault error type")
+        return ""
+    }
+}
+
 private final class VaultTransportFixture: AppVaultTransport, @unchecked Sendable {
     struct Call { let service: String; let operation: String; let account: String; let data: Data?; let interactive: Bool }
     private let lock = NSLock()
     private var recorded: [Call] = []
     private var storedResult = AppVaultReply(status: errSecSuccess, data: nil)
     private var storedEchoWrites = true
+    private var storedFailure: NSError?
+    var failure: NSError? {
+        get { lock.withLock { storedFailure } }
+        set { lock.withLock { storedFailure = newValue } }
+    }
     var result: AppVaultReply {
         get { lock.withLock { storedResult } }
         set { lock.withLock { storedResult = newValue } }
@@ -19,9 +45,10 @@ private final class VaultTransportFixture: AppVaultTransport, @unchecked Sendabl
         set { lock.withLock { storedEchoWrites = newValue } }
     }
     var calls: [Call] { lock.withLock { recorded } }
-    func perform(service: String, operation: String, account: String, data: Data?, interactionAllowed: Bool) -> AppVaultReply {
-        lock.withLock {
+    func perform(service: String, operation: String, account: String, data: Data?, interactionAllowed: Bool) throws -> AppVaultReply {
+        try lock.withLock {
             recorded.append(.init(service: service, operation: operation, account: account, data: data, interactive: interactionAllowed))
+            if let storedFailure { throw storedFailure }
             if operation == "write", storedEchoWrites, storedResult.status == errSecSuccess { return .init(status: errSecSuccess, data: data) }
             return storedResult
         }
@@ -40,15 +67,17 @@ private final class VaultFallbackFixture: KeychainAccess, @unchecked Sendable {
 
 private struct VaultCheckerFixture: VaultServiceChecking {
     var fails = false
+    var arbitraryFailure = false
     func validate() throws -> VaultServiceIdentity {
         if fails { throw AgentSwapError.unsupported("Synthetic modified component") }
+        if arbitraryFailure { throw arbitraryVaultError() }
         return try .init(executableSHA256: String(repeating: "a", count: 64),
                          cdHashes: [String(repeating: "b", count: 40), String(repeating: "c", count: 40)])
     }
 }
 
 private final class VaultSessionFixture: VaultCredentialSession, @unchecked Sendable {
-    enum Mode: Sendable { case good, nonce, version, user, disconnected, cancelled }
+    enum Mode: Sendable { case good, nonce, version, user, disconnected, cancelled, requestFailure, pingCancellation, requestCancellation }
     let mode: Mode
     private let lock = NSLock()
     private var recorded: [String] = []
@@ -56,33 +85,132 @@ private final class VaultSessionFixture: VaultCredentialSession, @unchecked Send
     init(_ mode: Mode = .good) { self.mode = mode }
     func ping(_ nonce: Data, deadline: TimeInterval) throws -> VaultHandshake {
         lock.withLock { recorded.append("ping") }
-        if mode == .disconnected { throw AgentSwapError.storage("Synthetic interrupted channel") }
+        if mode == .disconnected { throw arbitraryVaultError() }
+        if mode == .pingCancellation { throw CancellationError() }
         if mode == .cancelled { withUnsafeCurrentTask { $0?.cancel() } }
         return .init(version: mode == .version ? 99 : AgentSwapVaultWire.version,
                      nonce: mode == .nonce ? Data(repeating: 0, count: 1) : nonce,
                      peerUserID: mode == .user ? getuid() + 1 : getuid())
     }
-    func execute(service: String, operation: String, account: String, data: Data?, interactionAllowed: Bool, deadline: TimeInterval) -> AppVaultReply {
+    func execute(service: String, operation: String, account: String, data: Data?, interactionAllowed: Bool, deadline: TimeInterval) throws -> AppVaultReply {
         lock.withLock { recorded.append("execute") }
+        if mode == .requestFailure { throw arbitraryVaultError() }
+        if mode == .requestCancellation { throw CancellationError() }
         return .init(status: errSecSuccess, data: data)
     }
     func invalidate() { lock.withLock { recorded.append("invalidate") } }
 }
 
 private final class VaultSessionFactoryFixture: VaultSessionCreating, @unchecked Sendable {
+    enum Failure { case none, arbitrary, cancelled }
     let session: VaultSessionFixture
+    let failure: Failure
     private let lock = NSLock()
     private var requirements: [String] = []
     var opens: Int { lock.withLock { requirements.count } }
-    init(_ session: VaultSessionFixture = .init()) { self.session = session }
-    func open(peerRequirement: String, deadline: TimeInterval) -> any VaultCredentialSession {
+    init(_ session: VaultSessionFixture = .init(), failure: Failure = .none) { self.session = session; self.failure = failure }
+    func open(peerRequirement: String, deadline: TimeInterval) throws -> any VaultCredentialSession {
         lock.withLock { requirements.append(peerRequirement) }
+        if failure == .arbitrary { throw arbitraryVaultError() }
+        if failure == .cancelled { throw CancellationError() }
         return session
     }
 }
 
 @Suite("고정 앱 인증 저장소 경계")
 struct AppVaultKeychainTests {
+    @Test("Transport diagnostics identify only a static stage and never copy NSError contents",
+          arguments: [AppVaultFailureStage.connect, .handshake, .request])
+    func boundedTransportStage(_ stage: AppVaultFailureStage) {
+        let session = VaultSessionFixture(stage == .handshake ? .disconnected : stage == .request ? .requestFailure : .good)
+        let factory = VaultSessionFactoryFixture(session, failure: stage == .connect ? .arbitrary : .none)
+        let transport = AuthenticatedAppVaultTransport(checker: VaultCheckerFixture(), sessions: factory)
+        let message = vaultFailureMessage {
+            _ = try transport.perform(operation: "write", account: UUID().uuidString,
+                                      data: Data(vaultSecretMarker.utf8), interactionAllowed: false)
+        }
+        #expect(message.contains("vault.\(stage.rawValue)"))
+        #expect(!message.contains(vaultSecretMarker))
+        #expect(!message.contains("저장된 인증 접근 허용"))
+        #expect(session.calls == (stage == .connect ? [] : stage == .handshake ? ["ping", "invalidate"] : ["ping", "execute", "invalidate"]))
+    }
+
+    @Test("Cancellation remains cancellation at every transport stage",
+          arguments: [AppVaultFailureStage.connect, .handshake, .request])
+    func stageCancellation(_ stage: AppVaultFailureStage) {
+        let session = VaultSessionFixture(stage == .handshake ? .pingCancellation : stage == .request ? .requestCancellation : .good)
+        let factory = VaultSessionFactoryFixture(session, failure: stage == .connect ? .cancelled : .none)
+        let transport = AuthenticatedAppVaultTransport(checker: VaultCheckerFixture(), sessions: factory)
+        #expect(throws: CancellationError.self) {
+            _ = try transport.perform(operation: "read", account: UUID().uuidString, data: nil, interactionAllowed: false)
+        }
+        #expect(session.calls.last == (stage == .connect ? nil : "invalidate"))
+    }
+
+    @Test("Only permission-related OSStatus values suggest access approval",
+          arguments: [errSecAuthFailed, errSecInteractionNotAllowed, errSecParam, errSecIO, errSecDuplicateItem, errSecNotAvailable])
+    func boundedSDKStatus(_ status: OSStatus) {
+        let transport = VaultTransportFixture(), fallback = VaultFallbackFixture()
+        transport.result = .init(status: status, data: Data(vaultSecretMarker.utf8))
+        let access = AppVaultKeychainAccess(transport: transport, fallback: fallback)
+        let message = vaultFailureMessage {
+            _ = try access.read(service: KeychainSecretStore.service, account: UUID().uuidString)
+        }
+        #expect(message.contains("vault.request"))
+        #expect(message.contains("OSStatus \(status)"))
+        #expect(message.contains("저장된 인증 접근 허용") == (status == errSecAuthFailed || status == errSecInteractionNotAllowed))
+        #expect(!message.contains(vaultSecretMarker))
+        #expect(fallback.calls == 0)
+    }
+
+    @Test("Malformed successful replies do not suggest Keychain permission approval",
+          arguments: ["read", "write", "delete", "validate"])
+    func malformedReplyDiagnostic(_ operation: String) {
+        let transport = VaultTransportFixture(), fallback = VaultFallbackFixture()
+        transport.echoWrites = false
+        transport.result = .init(status: errSecSuccess, data: operation == "read" ? nil : Data(vaultSecretMarker.utf8))
+        let access = AppVaultKeychainAccess(transport: transport, fallback: fallback)
+        let account = UUID().uuidString, bytes = Data("Synthetic planned successor".utf8)
+        let message = vaultFailureMessage {
+            switch operation {
+            case "read": _ = try access.read(service: KeychainSecretStore.service, account: account)
+            case "write": try access.write(bytes, service: KeychainSecretStore.service, account: account)
+            case "delete": try access.delete(service: KeychainSecretStore.service, account: account)
+            default: try access.validateWrite(bytes, service: KeychainSecretStore.service, account: account)
+            }
+        }
+        #expect(message.contains("vault.request"))
+        #expect(!message.contains("저장된 인증 접근 허용"))
+        #expect(!message.contains(vaultSecretMarker))
+        #expect(fallback.calls == 0)
+    }
+
+    @Test("Raw transport errors are bounded at the Keychain boundary")
+    func rawTransportDiagnostic() {
+        let transport = VaultTransportFixture(), fallback = VaultFallbackFixture()
+        transport.failure = arbitraryVaultError()
+        let access = AppVaultKeychainAccess(transport: transport, fallback: fallback)
+        let message = vaultFailureMessage {
+            _ = try access.read(service: KeychainSecretStore.service, account: UUID().uuidString)
+        }
+        #expect(message.contains("vault.request"))
+        #expect(!message.contains(vaultSecretMarker))
+        #expect(!message.contains("저장된 인증 접근 허용"))
+        #expect(fallback.calls == 0)
+    }
+
+    @Test("Unknown checker failures cannot expose NSError metadata or open a channel")
+    func boundedCheckerFailure() {
+        let factory = VaultSessionFactoryFixture()
+        let transport = AuthenticatedAppVaultTransport(checker: VaultCheckerFixture(arbitraryFailure: true), sessions: factory)
+        let message = vaultFailureMessage {
+            _ = try transport.perform(operation: "read", account: UUID().uuidString, data: nil, interactionAllowed: false)
+        }
+        #expect(!message.contains(vaultSecretMarker))
+        #expect(!message.contains("저장된 인증 접근 허용"))
+        #expect(factory.opens == 0)
+    }
+
     @Test("Credentials are sent only after authenticating a same-channel nonce, version, and UID")
     func authenticatedBeforePayload() throws {
         let factory = VaultSessionFactoryFixture()
@@ -130,9 +258,10 @@ struct AppVaultKeychainTests {
     func modifiedComponent() {
         let factory = VaultSessionFactoryFixture()
         let transport = AuthenticatedAppVaultTransport(checker: VaultCheckerFixture(fails: true), sessions: factory)
-        #expect(throws: AgentSwapError.self) {
-            try transport.perform(operation: "read", account: UUID().uuidString, data: nil, interactionAllowed: false)
+        let message = vaultFailureMessage {
+            _ = try transport.perform(operation: "read", account: UUID().uuidString, data: nil, interactionAllowed: false)
         }
+        #expect(message == "Synthetic modified component")
         #expect(factory.opens == 0)
         #expect(factory.session.calls.isEmpty)
     }

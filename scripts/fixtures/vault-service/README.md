@@ -39,11 +39,15 @@ may be stopped. Default-Keychain and search-list metadata must match at cleanup.
   owned services and existing recovery-key grammars are covered. A 128 MiB
   recovery value is written, read back exactly, and deleted through the actual
   SDK backend and direct `Data` RPC transport.
+  `SessionGetInfo` verifies that each successful production helper joins its
+  parent's audit security session. A separately signed control changes only
+  `JoinExistingSession` to false and must report a different session after a
+  successful handshake; its invalid-service request must make zero backend calls.
 
 The production suite also requires zero backend calls for an unauthorized caller,
 execute before ping, malformed account, unowned service, and wrong helper pin.
 Its event log contains only synthetic operation names, service kinds, byte sizes,
-and process IDs. It contains no payloads or account values.
+process IDs, and audit-session metadata. It contains no payloads or account values.
 
 The end-to-end fixture directly exercises the production session factory rather
 than weakening `VaultServiceIdentity`'s release certificate pin.

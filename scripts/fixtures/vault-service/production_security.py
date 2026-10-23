@@ -41,7 +41,7 @@ def metadata():
 def main():
     started = time.monotonic()
     before = metadata()
-    source_paths = [PROTOCOL, SERVER / "SystemVaultKeychainBackend.swift", SERVER / "VaultRequestProcessor.swift",
+    source_paths = [PROTOCOL, SERVER / "Info.plist", SERVER / "SystemVaultKeychainBackend.swift", SERVER / "VaultRequestProcessor.swift",
                     SERVER / "VaultXPCService.swift", CORE / "AppVaultTransport.swift",
                     FIXTURES / "ServerMain.swift", FIXTURES / "ClientMain.swift", FIXTURES / "ClientSupport.swift"]
     def source_digest():
@@ -155,16 +155,48 @@ subjectKeyIdentifier=hash
         def rows():
             return [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
 
-        def case(label, parent, mode, *, rejection=False, expected_backend=None, requirement=peer_requirement):
+        def startup_rows():
+            path = Path(str(events) + ".startup")
+            return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+        def case(label, parent, mode, *, rejection=False, expected_backend=None, requirement=peer_requirement,
+                 expected_session_match=True):
             initial = len(rows())
+            initial_startup = len(startup_rows())
             result = run([applications[parent][1], requirement, mode], timeout=135 if mode == "large" else 20, success=not rejection)
             if rejection:
                 assert result.returncode != 0, label + " unexpectedly accepted"
             else:
-                assert json.loads(result.stdout)["passed"], label
+                outcome = json.loads(result.stdout)
+                assert outcome["passed"], label
             delta = rows()[initial:]
             if expected_backend is not None:
                 assert len(delta) == expected_backend, (label, "unexpected backend calls", len(delta))
+            if not rejection:
+                # Session IDs are OS audit-session metadata, never credential/account
+                # values. Match the exact helper PID that served this case rather
+                # than borrowing an earlier helper's row after a relaunch.
+                assert outcome["securitySessionStatus"] == 0 and outcome["securitySessionID"] != 0, label
+                observed_startup = startup_rows()
+                helpers = {row["helper"] for row in delta}
+                if not helpers:
+                    helpers = {row["pid"] for row in observed_startup[initial_startup:]
+                               if row["stage"] == "security-session"}
+                assert helpers, (label, "no helper security-session evidence")
+                helper_graphic_access = []
+                for helper in helpers:
+                    sessions = [row for row in observed_startup if row["stage"] == "security-session" and row["pid"] == helper]
+                    assert sessions and sessions[-1]["status"] == 0 and sessions[-1]["securitySessionID"] != 0, label
+                    same = sessions[-1]["securitySessionID"] == outcome["securitySessionID"]
+                    assert same == expected_session_match, (label, "helper audit session does not satisfy the expected join policy")
+                    # AuthSession.h defines sessionHasGraphicAccess as 0x0010.
+                    # Record capability as a boolean; do not assume the CI caller
+                    # itself belongs to a graphical login session.
+                    helper_graphic_access.append(bool(sessions[-1]["securitySessionAttributes"] & 0x0010))
+                print(json.dumps({"audit_session_case": label, "helper_matches_parent": expected_session_match,
+                                  "session_get_info_succeeded": True,
+                                  "parent_has_graphic_access": bool(outcome["securitySessionAttributes"] & 0x0010),
+                                  "all_helpers_have_graphic_access": all(helper_graphic_access)}), flush=True)
             print("Production " + label + ": passed (backend calls=" + str(len(delta)) + ")", flush=True)
             return delta
 
@@ -180,8 +212,27 @@ subjectKeyIdentifier=hash
              requirement=peer_requirement.replace(identities[0][0], identities[1][0]))
         large = case("128 MiB recovery SDK write/read/delete", "parent-b", "large")
         assert any(row["operation"] == "write" and row["size"] == 128 * 1024 * 1024 for row in large)
+
+        # A signed copy with the sole session policy changed provides a negative
+        # control. Complete authentication, then reject an unowned service before
+        # the SDK backend: this never tries to decrypt an item owned by the normal
+        # helper's different code hash and cannot open an authorization prompt.
+        false_app = directory / "separate-session-control.app"
+        shutil.copytree(applications["parent-a"][0], false_app)
+        false_helper = false_app / "Contents/XPCServices/AgentSwapVaultService.xpc"
+        false_info_path = false_helper / "Contents/Info.plist"
+        false_info = plistlib.loads(false_info_path.read_bytes())
+        false_info["XPCService"]["JoinExistingSession"] = False
+        false_info_path.write_bytes(plistlib.dumps(false_info))
+        sign(false_helper, HELPER_ID)
+        false_requirement = peer_requirement.replace(helper_hash, cdhash(false_helper))
+        sign(false_app, PARENT_ID)
+        applications["separate-session-control"] = (false_app, false_app / "Contents/MacOS/FixtureClient")
+        case("JoinExistingSession=false negative control", "separate-session-control", "invalid-service",
+             expected_backend=0, requirement=false_requirement, expected_session_match=False)
         assert source_digest() == compiled_sources, "Production fixture sources changed while the hook was running."
-        print(json.dumps({"suite": "Production session/server/SDK", "passed": True, "cases": 9,
+        print(json.dumps({"suite": "Production session/server/SDK", "passed": True, "cases": 10,
+                          "joined_audit_sessions_verified": True, "separate_session_negative_control": True,
                           "payload_bytes": 128 * 1024 * 1024, "source_sha256": compiled_sources, "elapsed_seconds": round(time.monotonic() - started, 2)}), flush=True)
         completed = True
     finally:

@@ -7,6 +7,10 @@ struct AppVaultReply: Sendable {
     let data: Data?
 }
 
+enum AppVaultFailureStage: String, Sendable {
+    case connect, handshake, request
+}
+
 protocol AppVaultTransport: Sendable {
     func perform(service: String, operation: String, account: String, data: Data?, interactionAllowed: Bool) throws -> AppVaultReply
 }
@@ -78,8 +82,16 @@ public struct AppVaultKeychainAccess: KeychainAccess, KeychainWritePreflighting 
         if !NativeSecurityCancellation.permitsRecovery { try Task.checkCancellation() }
         // There is deliberately no SDK or SecurityTool fallback after a denied,
         // interrupted, missing, or untrusted service request.
-        return try transport.perform(service: service, operation: operation, account: account, data: data,
-                                     interactionAllowed: KeychainInteraction.mode == .interactive)
+        do {
+            return try transport.perform(service: service, operation: operation, account: account, data: data,
+                                         interactionAllowed: KeychainInteraction.mode == .interactive)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as AgentSwapError {
+            throw error
+        } catch {
+            throw appVaultFailure()
+        }
     }
 
     private func usesAppVault(_ service: String) throws -> Bool {
@@ -94,14 +106,22 @@ public struct AppVaultKeychainAccess: KeychainAccess, KeychainWritePreflighting 
 
     private func requireSuccess(_ result: AppVaultReply) throws {
         guard result.status == errSecSuccess else {
-            if result.status == errSecDuplicateItem {
-                throw AgentSwapError.storage("같은 계정의 인증 항목이 여러 저장소에 있어 변경을 중단했습니다.")
-            }
-            throw appVaultFailure()
+            throw appVaultFailure(status: result.status)
         }
     }
 }
 
-func appVaultFailure() -> AgentSwapError {
-    .storage("저장된 인증에 접근하지 못했습니다. 계정 상세의 저장된 인증 접근 허용으로 이 계정의 권한을 확인해 주세요.")
+func appVaultFailure(_ stage: AppVaultFailureStage = .request, status: OSStatus? = nil) -> AgentSwapError {
+    let code = "vault.\(stage.rawValue)"
+    guard let status else {
+        return .storage("저장된 인증 요청을 완료하지 못했습니다. (\(code))")
+    }
+    let diagnostic = "\(code), OSStatus \(status)"
+    if status == errSecAuthFailed || status == errSecInteractionNotAllowed {
+        return .storage("Keychain 접근을 허용하거나 잠금을 해제해 주세요. 계정 상세의 저장된 인증 접근 허용에서 확인할 수 있습니다. (\(diagnostic))")
+    }
+    if status == errSecDuplicateItem {
+        return .storage("같은 계정의 인증 항목이 여러 저장소에 있어 변경을 중단했습니다. (\(diagnostic))")
+    }
+    return .storage("Keychain 요청에 실패했습니다. (\(diagnostic))")
 }
