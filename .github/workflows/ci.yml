@@ -31,6 +31,8 @@ jobs:
       - name: Test Core
         timeout-minutes: 5
         run: ./scripts/test-core.sh
+      - name: Test frozen vault artifact validation
+        run: python3 scripts/test-vault-service-artifact.py
       - name: Build Release app
         run: ./scripts/build-app.sh
       - name: Verify app and project

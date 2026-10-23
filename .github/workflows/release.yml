@@ -38,6 +38,8 @@ jobs:
       - name: Verify stable release signing boundary
         timeout-minutes: 2
         run: python3 scripts/test-release-signing.py
+      - name: Verify frozen vault artifact validation
+        run: python3 scripts/test-vault-service-artifact.py
       - name: Import dedicated release signing identity
         env:
           AGENTSWAP_SIGNING_P12_BASE64: ${{ secrets.AGENTSWAP_SIGNING_P12_BASE64 }}
@@ -92,7 +94,7 @@ jobs:
           AgentSwap checks GitHub Releases for updates. The signed appcast.xml and ZIP are hosted as release assets; no separate update server is used.
           Versions before v0.1.0-beta.6 need a one-time manual download to enable the updater.
           The app uses the project's dedicated self-signed certificate and pinned designated requirement. Apple Developer ID signing and notarization are not included.
-          macOS also checks Keychain partitions, which identify this self-signed app by executable cdhash. Account access may require renewed foreground approval after each update even when the certificate is unchanged. Use the app's saved-account access action before retrying usage reads.
+          App-owned credentials use a dedicated frozen XPC service whose signed bytes are reused across app updates. Existing items may require foreground approval when migrating from an older release. Replacing the vault service itself requires a separately reviewed migration. Use the app's saved-account access action before retrying usage reads.
           The project remains in development. See README and docs/VALIDATION.md for known limitations.
           NOTES
           gh release create "$AGENTSWAP_TAG" "$AGENTSWAP_ZIP" "$AGENTSWAP_CHECKSUMS" "$AGENTSWAP_APPCAST" \

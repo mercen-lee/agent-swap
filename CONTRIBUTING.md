@@ -77,6 +77,27 @@ CI는 encrypted repository secrets `AGENTSWAP_SIGNING_P12_BASE64`·`AGENTSWAP_SI
 
 로컬 패키징은 고정 인증서의 개인 키가 있는 Keychain의 경로를 `AGENTSWAP_RELEASE_SIGNING_KEYCHAIN`으로 지정합니다. 패키징은 인증서 원문·개인 키 존재·서명 후 DR을 확인하고, ad-hoc이나 다른 인증서를 거부합니다. `python3 scripts/test-release-signing.py`는 독립된 합성 키로 코드가 다른 두 앱의 DR 연속성, 잘못된 인증서·ad-hoc 거부, CI 준비·반복 정리와 검색 목록 불변을 확인합니다.
 
+### 고정 vault 서비스의 생성과 배포
+
+앱 업데이트마다 바뀌는 실행 파일 대신, 앱 소유 Keychain에는 별도로 고정한 `AgentSwapVaultService.xpc`를 사용합니다. 대상은 `net.mercen.agentswap`·`net.mercen.agentswap.recovery`·`net.mercen.agentswap.desktop` 세 서비스와 컴파일된 계정 이름 형식입니다. Claude·Codex 네이티브 저장소에는 이 경로를 적용하지 않습니다. XPC 서비스는 `net.mercen.agentswap.vault` 식별자와 기존 공개 인증서를 사용하며, 일반 interpreter나 모든 앱을 신뢰하는 ACL을 추가하지 않습니다. 기존 항목의 최초 접근 승인을 대신하거나 self-signed 서명을 Developer ID·공증으로 바꾸는 기능은 아닙니다.
+
+서비스 실행 파일은 앱 릴리스마다 다시 만들지 않습니다. [`vault-service.yml`](.github/workflows/vault-service.yml)을 검토한 정확한 40자리 source commit으로 수동 실행하면 Core·합성 보안 검증 후 임시 CI signing Keychain에서 macOS 14용 Universal 서비스를 한 번 서명합니다. 서비스에는 별도 entitlements를 부여하지 않습니다. [`package-vault-service.sh`](scripts/package-vault-service.sh)는 ZIP과 공개 manifest를 검토용 Actions 산출물로 만들며 공개 릴리스에 자동 업로드하지 않습니다. 이 단계는 서비스 생성용이며 새 앱의 공개 릴리스가 아닙니다.
+
+담당자는 실제 산출물의 서명·양쪽 아키텍처·최소 OS·파일 목록과 source commit·CI run을 확인한 뒤, source SHA가 포함된 고유 이름으로 공개 자산을 추가합니다. 기존 앱 ZIP·appcast·SHA256SUMS나 태그를 덮어쓰지 않습니다. 기존 릴리스에 서비스 자산을 추가하면 서비스의 소스는 그 릴리스 태그와 다를 수 있으므로 manifest의 `sourceCommit`·`runID`로 추적합니다. 빌드 산출물·키를 Git에 넣지 않고, 공개 URL·ZIP digest·파일 digest·각 아키텍처 CDHash·인증서·DR을 담은 `scripts/signing/vault-service-v1.json`만 소스에 고정합니다.
+
+앱에 컴파일하는 `FrozenVaultServiceRelease.identity`에도 같은 실행 파일 SHA-256과 두 CDHash를 넣어야 합니다. 다음 검사는 Swift 코드를 실행하지 않고 지정된 literal initializer, wire 인증서 상수, 공개 DER와 manifest의 일치를 확인합니다. 값이 없는 bootstrap placeholder·중복 선언·다른 hash에서는 실패합니다.
+
+```sh
+python3 scripts/test-vault-service-artifact.py
+python3 scripts/fetch-vault-service.py \
+  --pin scripts/signing/vault-service-v1.json \
+  --verify-source-pin AgentSwapCore/Sources/AgentSwapCore/AppVaultTransport.swift
+```
+
+일반 빌드·릴리스 패키징에는 실제 공개 pin과 앱에 컴파일한 pin의 일치가 필요합니다. 서비스 조립은 빌드 staging 앱에만 수행하고, 외부 앱을 서명한 뒤에도 [`fetch-vault-service.py`](scripts/fetch-vault-service.py)의 `--verify-bundle`로 서비스 바이트·서명·CDHash를 다시 확인합니다. ad-hoc 빌드도 서비스 추가 뒤 외부 앱을 다시 서명해야 합니다. 서명에 `--deep`를 사용하거나 서비스에 strip·lipo·재서명을 적용하면 고정 바이트가 바뀌므로 금지합니다. `--deep`는 검증에만 사용합니다.
+
+ad-hoc·다른 인증서의 개발 앱은 배포용 서비스가 요구하는 앱 서명을 충족하지 못하므로 실계정 vault에 접근할 수 없습니다. 개발에는 메모리 데모와 합성 fixture를 사용하고, 이 제한을 우회하도록 서비스의 caller requirement·pin·ACL을 완화하지 않습니다. 사용자의 Mac에서 서비스를 컴파일하지 않으므로 서비스 실행에 Xcode나 Command Line Tools를 요구하지 않습니다. 서비스나 wire protocol 자체의 보안·호환성 수정은 별도의 서비스 버전과 pin·승인 이관을 검토해야 하며, 기존 고정 자산을 교체하지 않습니다. 실제 공개 바이너리 사이의 접근 연속성·기존 항목 이관은 별도 검증 결과로 기록합니다.
+
 ## Git에 포함할 자료
 
 소스·공유 Xcode scheme·아이콘 자산·합성 fixture와 문서를 포함합니다. 앱·DerivedData·SwiftPM 캐시·Xcode 사용자 상태는 제외합니다. 인증 파일·토큰·실계정 정보·대화·로그·개인 절대 경로는 커밋하지 않습니다. 공개 스크린샷에는 데모 계정만 사용하세요.

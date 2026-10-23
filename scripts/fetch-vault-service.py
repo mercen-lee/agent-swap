@@ -90,6 +90,117 @@ def load_manifest(path, certificate):
     return pin
 
 
+def swift_tokens(source):
+    """Read literal pin declarations without executing Swift or accepting comments."""
+    tokens = []
+    position = 0
+    while position < len(source):
+        if source[position].isspace():
+            position += 1
+        elif source.startswith("//", position):
+            end = source.find("\n", position)
+            position = len(source) if end < 0 else end + 1
+        elif source.startswith("/*", position):
+            depth = 1
+            position += 2
+            while depth and position < len(source):
+                if source.startswith("/*", position):
+                    depth += 1
+                    position += 2
+                elif source.startswith("*/", position):
+                    depth -= 1
+                    position += 2
+                else:
+                    position += 1
+            require(depth == 0, "unterminated Swift comment")
+        elif source.startswith('"""', position):
+            end = source.find('"""', position + 3)
+            require(end >= 0, "unterminated Swift multiline string")
+            tokens.append(("string", source[position + 3:end]))
+            position = end + 3
+        elif source[position] == '"':
+            start = position + 1
+            position = start
+            while position < len(source) and source[position] != '"':
+                position += 2 if source[position] == "\\" else 1
+            require(position < len(source), "unterminated Swift string")
+            tokens.append(("string", source[start:position]))
+            position += 1
+        else:
+            word = re.match(r"[A-Za-z_][A-Za-z_0-9]*|[0-9]+", source[position:])
+            if word:
+                tokens.append(word.group())
+                position += len(word.group())
+            else:
+                tokens.append(source[position])
+                position += 1
+    return tokens
+
+
+def swift_enum(tokens, name):
+    starts = [index + 3 for index in range(len(tokens) - 2) if tokens[index:index + 3] == ["enum", name, "{"]]
+    require(len(starts) == 1, f"one {name} declaration is required")
+    start = starts[0]
+    depth = 1
+    for index in range(start, len(tokens)):
+        if tokens[index] == "{":
+            depth += 1
+        elif tokens[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return tokens[start:index]
+    raise ValueError(f"unterminated {name} declaration")
+
+
+def verify_source_pin(source_path, pin, certificate, wire_source=None):
+    # The intentionally narrow grammar fails closed when the initializer changes.
+    # It accepts the reviewed literal form only, never a computed/default identity.
+    source_path, certificate = Path(source_path), Path(certificate)
+    body = swift_enum(swift_tokens(regular_bytes(source_path, 1024 * 1024).decode("utf-8")), "FrozenVaultServiceRelease")
+    position = 0
+
+    def consume(*expected):
+        nonlocal position
+        require(body[position:position + len(expected)] == list(expected), "runtime pin must use the reviewed literal initializer")
+        position += len(expected)
+
+    def string_literal(count):
+        nonlocal position
+        require(position < len(body) and isinstance(body[position], tuple) and body[position][0] == "string", "runtime pin requires literal hash strings")
+        value = body[position][1]
+        require(re.fullmatch(r"[0-9a-f]{" + str(count) + r"}", value), "runtime pin contains an invalid hash")
+        position += 1
+        return value
+
+    consume("static", "let", "identity", ":", "VaultServiceIdentity", "?", "=", "try", "?", ".", "init", "(", "executableSHA256", ":")
+    executable = string_literal(64)
+    consume(",", "cdHashes", ":", "[")
+    first = string_literal(40)
+    consume(",")
+    second = string_literal(40)
+    if body[position:position + 1] == [","]:
+        position += 1
+    consume("]")
+    if body[position:position + 1] == [","]:
+        position += 1
+    consume(")")
+    require(position == len(body), "runtime pin contains additional declarations or expressions")
+    require(executable == pin["executableSHA256"], "runtime executable SHA-256 differs from the manifest")
+    expected_cdhashes = [pin["architectures"][arch]["cdhash"] for arch in ("arm64", "x86_64")]
+    require(sorted([first, second]) == sorted(expected_cdhashes), "runtime cdhashes differ from the manifest")
+
+    wire_source = Path(wire_source) if wire_source else ROOT / "AgentSwapCore/Sources/AgentSwapVaultProtocol/VaultProtocol.swift"
+    wire = swift_enum(swift_tokens(regular_bytes(wire_source, 1024 * 1024).decode("utf-8")), "AgentSwapVaultWire")
+    prefix = ["public", "static", "let", "certificateSHA1", "="]
+    declarations = [index for index in range(len(wire) - len(prefix)) if wire[index:index + len(prefix)] == prefix]
+    require(len(declarations) == 1, "one wire certificate pin declaration is required")
+    index = declarations[0] + len(prefix)
+    require(isinstance(wire[index], tuple) and wire[index][0] == "string" and
+            (index + 1 == len(wire) or wire[index + 1] == "public"), "wire certificate pin must be a standalone literal")
+    fingerprint = hashlib.sha1(regular_bytes(certificate, 64 * 1024)).hexdigest().upper()
+    require(wire[index][1] == fingerprint == pin["certificateSHA1"], "wire certificate, public DER and manifest pins differ")
+
+
 def verify_files(bundle, pin):
     require(bundle.is_dir() and not bundle.is_symlink(), "vault bundle must be a directory")
     seen = set()
@@ -117,7 +228,9 @@ def verify_files(bundle, pin):
 def verify_bundle(bundle, pin, certificate):
     verify_files(bundle, pin)
     requirement = pin["designatedRequirement"]
-    command(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "-R", requirement, bundle])
+    # codesign interprets a bare requirement as a filename. A leading '=' selects
+    # literal requirement source, independently of the embedded DR display format.
+    command(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "-R", "=" + requirement, bundle])
     actual = command(["/usr/bin/codesign", "--display", "--requirements", "-", bundle]).stdout.decode().strip()
     require(actual == "designated => " + requirement, "embedded helper requirement differs from the pin")
     entitlements = command(["/usr/bin/codesign", "--display", "--entitlements", ":-", bundle]).stdout
@@ -197,9 +310,15 @@ def main():
     targets = parser.add_mutually_exclusive_group(required=True)
     targets.add_argument("--destination", type=Path)
     targets.add_argument("--verify-bundle", type=Path)
+    targets.add_argument("--verify-source-pin", type=Path)
     parser.add_argument("--archive", type=Path)
     args = parser.parse_args()
     pin = load_manifest(args.pin, args.certificate)
+    if args.verify_source_pin:
+        require(args.archive is None, "--archive requires --destination")
+        verify_source_pin(args.verify_source_pin, pin, args.certificate)
+        print("Frozen vault service: runtime source, wire certificate and manifest pins match.")
+        return
     if args.verify_bundle:
         require(args.archive is None, "--archive requires --destination")
         verify_bundle(args.verify_bundle, pin, args.certificate)

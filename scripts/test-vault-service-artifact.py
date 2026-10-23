@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import warnings
 import zipfile
 
@@ -45,7 +46,7 @@ class ArtifactValidationTests(unittest.TestCase):
             "executable": ARTIFACT.EXECUTABLE, "bundleIdentifier": ARTIFACT.IDENTIFIER,
             "sourceCommit": "a" * 40, "runID": "1234", "certificateSHA1": fingerprint,
             "designatedRequirement": f'identifier "{ARTIFACT.IDENTIFIER}" and certificate leaf = H"{fingerprint}"',
-            "architectures": {arch: {"cdhash": "b" * 40, "minimumOS": "14.0"} for arch in ("arm64", "x86_64")},
+            "architectures": {arch: {"cdhash": value * 40, "minimumOS": "14.0"} for arch, value in (("arm64", "b"), ("x86_64", "c"))},
             "files": {name: {"sha256": ARTIFACT.sha256(data), "size": len(data),
                              "mode": 0o755 if name.startswith("Contents/MacOS/") else 0o644}
                       for name, data in self.contents.items()},
@@ -88,6 +89,25 @@ class ArtifactValidationTests(unittest.TestCase):
         bundle = self.extract()
         ARTIFACT.verify_files(bundle, self.pin)
         self.assertEqual({name: (bundle / name).read_bytes() for name in self.contents}, self.contents)
+
+    def test_codesign_verification_uses_literal_requirement_not_a_filename(self):
+        bundle = self.extract()
+
+        class RequirementCaptured(Exception):
+            pass
+
+        def capture(arguments):
+            self.assertEqual(arguments[0], "/usr/bin/codesign")
+            self.assertIn("--verify", arguments)
+            self.assertEqual(arguments[arguments.index("-R") + 1], "=" + self.pin["designatedRequirement"])
+            raise RequirementCaptured
+
+        # Stop before any external verifier: these bytes are intentionally fake,
+        # and the regression concerns codesign's public argument grammar only.
+        with patch.object(ARTIFACT, "command", side_effect=capture) as mocked:
+            with self.assertRaises(RequirementCaptured):
+                ARTIFACT.verify_bundle(bundle, self.pin, self.certificate)
+            mocked.assert_called_once()
 
     def test_archive_byte_change_rejected_before_extraction(self):
         with self.archive.open("ab") as output:
@@ -175,6 +195,82 @@ class ArtifactValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ARTIFACT.download(pin, self.root / "must-not-download")
                 self.assertFalse((self.root / "must-not-download").exists())
+
+    def source_fixture(self):
+        source = self.root / "AppVaultTransport.swift"
+        source.write_text('''import Foundation
+enum FrozenVaultServiceRelease {
+    /* reviewed /* nested */ pin */
+    static let identity: VaultServiceIdentity? = try? .init(
+        executableSHA256: "''' + self.pin["executableSHA256"] + '''",
+        cdHashes: ["''' + self.pin["architectures"]["arm64"]["cdhash"] + '''", "''' + self.pin["architectures"]["x86_64"]["cdhash"] + '''",],
+    )
+}
+''')
+        wire = self.root / "VaultProtocol.swift"
+        wire.write_text('''public enum AgentSwapVaultWire {
+    public static let certificateSHA1 = "''' + self.pin["certificateSHA1"] + '''"
+    public static let version = 1
+}
+''')
+        return source, wire
+
+    def test_runtime_source_pin_matches_manifest_and_public_certificate(self):
+        source, wire = self.source_fixture()
+        ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+
+    def test_runtime_pin_requires_both_architectures_independent_of_order(self):
+        source, wire = self.source_fixture()
+        original = source.read_text()
+        first, second = [self.pin["architectures"][arch]["cdhash"] for arch in ("arm64", "x86_64")]
+        source.write_text(original.replace(first, "TEMP").replace(second, first).replace("TEMP", second))
+        ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+        source.write_text(original.replace(second, first))
+        with self.assertRaisesRegex(ValueError, "cdhashes differ"):
+            ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+
+    def test_runtime_hash_or_certificate_drift_is_rejected(self):
+        source, wire = self.source_fixture()
+        original = source.read_text()
+        for before, after in ((self.pin["executableSHA256"], "d" * 64),
+                              (self.pin["architectures"]["arm64"]["cdhash"], "e" * 40)):
+            with self.subTest(before=before):
+                source.write_text(original.replace(before, after))
+                with self.assertRaisesRegex(ValueError, "differs from the manifest|differ from the manifest"):
+                    ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+        source.write_text(original)
+        wire.write_text(wire.read_text().replace(self.pin["certificateSHA1"], "F" * 40))
+        with self.assertRaisesRegex(ValueError, "certificate.*pins differ"):
+            ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+
+    def test_bootstrap_missing_and_nil_runtime_pin_cannot_pass(self):
+        source, wire = self.source_fixture()
+        for body in ("", "enum FrozenVaultServiceRelease { static var identity: VaultServiceIdentity? { nil } }",
+                     "enum FrozenVaultServiceRelease { static let identity: VaultServiceIdentity? = nil }"):
+            with self.subTest(body=body):
+                source.write_text(body)
+                with self.assertRaises(ValueError):
+                    ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+
+    def test_commented_or_quoted_pin_is_not_a_runtime_declaration(self):
+        source, wire = self.source_fixture()
+        declaration = source.read_text()
+        for decoy in ("/* " + declaration + " */", 'let example = """' + declaration + '"""'):
+            with self.subTest(decoy=decoy[:10]):
+                source.write_text(decoy)
+                with self.assertRaises(ValueError):
+                    ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+
+    def test_duplicate_runtime_or_computed_certificate_pin_is_rejected(self):
+        source, wire = self.source_fixture()
+        original = source.read_text()
+        source.write_text(original + original)
+        with self.assertRaisesRegex(ValueError, "one FrozenVaultServiceRelease"):
+            ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
+        source.write_text(original)
+        wire.write_text(wire.read_text().replace('"\n', '" + "suffix"\n', 1))
+        with self.assertRaisesRegex(ValueError, "standalone literal"):
+            ARTIFACT.verify_source_pin(source, self.load(), self.certificate, wire)
 
 
 if __name__ == "__main__":
