@@ -20,7 +20,7 @@ public actor CodexAuthStore {
         .init(identifier: "codex|" + storageDigest(home.path, prefix: 32), keychain: keychain, files: files)
     }
     public init(home: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true),
-                keychain: any KeychainAccess = SystemKeychainAccess(), files: any AuthFileAccess = AtomicAuthFileAccess(),
+                keychain: any KeychainAccess = AppVaultKeychainAccess(), files: any AuthFileAccess = AtomicAuthFileAccess(),
                 lockTimeout: TimeInterval = 9, configurationGuard: any CodexConfigurationGuard = SystemCodexConfigurationGuard()) {
         self.home = home
         let canonical = FileManager.default.fileExists(atPath: home.path) ? home.resolvingSymlinksInPath().path : home.path

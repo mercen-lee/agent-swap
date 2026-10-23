@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Fetch or verify the exact, frozen AgentSwap XPC vault service (public data only)."""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path, PurePosixPath
+import plistlib
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+import zipfile
+
+
+BUNDLE = "AgentSwapVaultService.xpc"
+EXECUTABLE = "AgentSwapVaultService"
+IDENTIFIER = "net.mercen.agentswap.vault"
+FILES = {"Contents/Info.plist", f"Contents/MacOS/{EXECUTABLE}", "Contents/_CodeSignature/CodeResources"}
+MAX_ARCHIVE = 64 * 1024 * 1024
+MAX_FILE = 32 * 1024 * 1024
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def command(arguments):
+    result = subprocess.run([str(value) for value in arguments], capture_output=True)
+    require(result.returncode == 0, f"public verification failed: {Path(arguments[0]).name}")
+    return result
+
+
+def regular_bytes(path, maximum):
+    require(path.is_file() and not path.is_symlink(), "expected a regular file")
+    require(path.stat().st_size <= maximum, "file exceeds its size limit")
+    with path.open("rb") as stream:
+        data = stream.read(maximum + 1)
+    require(len(data) <= maximum, "file exceeds its size limit")
+    return data
+
+
+def unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "duplicate JSON keys are forbidden")
+        result[key] = value
+    return result
+
+
+def load_manifest(path, certificate):
+    pin = json.loads(regular_bytes(path, 1024 * 1024), object_pairs_hook=unique_keys)
+    require(isinstance(pin, dict) and type(pin.get("schemaVersion")) is int and pin["schemaVersion"] == 1 and type(pin.get("protocolVersion")) is int and pin["protocolVersion"] == 1, "unsupported vault artifact schema or protocol")
+    require(pin.get("bundleName") == BUNDLE and pin.get("executable") == EXECUTABLE and pin.get("bundleIdentifier") == IDENTIFIER, "unexpected vault service identity")
+    require(isinstance(pin.get("sourceCommit"), str) and re.fullmatch(r"[0-9a-f]{40}", pin["sourceCommit"]), "invalid source commit")
+    require(isinstance(pin.get("runID"), str) and re.fullmatch(r"[1-9][0-9]*", pin["runID"]), "invalid build run ID")
+    der = regular_bytes(certificate, 64 * 1024)
+    fingerprint = hashlib.sha1(der).hexdigest().upper()
+    expected_requirement = f'identifier "{IDENTIFIER}" and certificate leaf = H"{fingerprint}"'
+    require(pin.get("certificateSHA1") == fingerprint and pin.get("designatedRequirement") == expected_requirement, "certificate or designated requirement differs from the source pin")
+    require(isinstance(pin.get("executableSHA256"), str) and re.fullmatch(r"[0-9a-f]{64}", pin["executableSHA256"]), "invalid executable digest")
+    archive = pin.get("archive")
+    require(isinstance(archive, dict), "missing archive pin")
+    require(archive.get("name") == f'AgentSwapVaultService-{pin["sourceCommit"]}-universal.zip', "unexpected archive filename")
+    require(isinstance(archive.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", archive["sha256"]), "invalid archive digest")
+    require(type(archive.get("size")) is int and 0 < archive["size"] <= MAX_ARCHIVE, "invalid archive size")
+    architectures = pin.get("architectures")
+    require(isinstance(architectures, dict) and set(architectures) == {"arm64", "x86_64"}, "unexpected architecture inventory")
+    for value in architectures.values():
+        require(isinstance(value, dict) and isinstance(value.get("cdhash"), str) and re.fullmatch(r"[0-9a-f]{40}", value["cdhash"]), "invalid architecture cdhash")
+        require(value.get("minimumOS") == "14.0", "unexpected helper minimum macOS")
+    files = pin.get("files")
+    require(isinstance(files, dict) and set(files) == FILES, "unexpected bundle file inventory")
+    for name, value in files.items():
+        require(isinstance(value, dict) and isinstance(value.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]), "invalid file digest")
+        require(type(value.get("size")) is int and 0 < value["size"] <= MAX_FILE, "invalid file size")
+        require(value.get("mode") == (0o755 if name.startswith("Contents/MacOS/") else 0o644), "unexpected file permissions")
+    require(sum(value["size"] for value in files.values()) <= MAX_ARCHIVE, "expanded bundle exceeds its size limit")
+    require(pin["executableSHA256"] == files[f"Contents/MacOS/{EXECUTABLE}"]["sha256"], "executable pins disagree")
+    return pin
+
+
+def verify_files(bundle, pin):
+    require(bundle.is_dir() and not bundle.is_symlink(), "vault bundle must be a directory")
+    seen = set()
+    for path in bundle.rglob("*"):
+        require(not path.is_symlink(), "symlinks are forbidden in the vault bundle")
+        if path.is_dir():
+            require(path.relative_to(bundle).as_posix() in {"Contents", "Contents/MacOS", "Contents/_CodeSignature"}, "unexpected bundle directory")
+            continue
+        name = path.relative_to(bundle).as_posix()
+        require(name in FILES, "unexpected bundle file")
+        data = regular_bytes(path, MAX_FILE)
+        value = pin["files"][name]
+        require(len(data) == value["size"] and sha256(data) == value["sha256"], "bundle differs from the frozen file manifest")
+        require(stat.S_IMODE(path.stat().st_mode) == value["mode"], "bundle file permissions differ from the manifest")
+        seen.add(name)
+    require(seen == FILES, "incomplete vault bundle")
+    info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+    expected = {"CFBundleIdentifier": IDENTIFIER, "CFBundleExecutable": EXECUTABLE,
+                "CFBundleName": "AgentSwap Vault", "CFBundleShortVersionString": "1.0",
+                "CFBundlePackageType": "XPC!", "CFBundleVersion": "1",
+                "LSMinimumSystemVersion": "14.0", "XPCService": {"ServiceType": "Application", "RunLoopType": "dispatch_main"}}
+    require(info == expected, "unexpected XPC bundle metadata")
+
+
+def verify_bundle(bundle, pin, certificate):
+    verify_files(bundle, pin)
+    requirement = pin["designatedRequirement"]
+    command(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "-R", requirement, bundle])
+    actual = command(["/usr/bin/codesign", "--display", "--requirements", "-", bundle]).stdout.decode().strip()
+    require(actual == "designated => " + requirement, "embedded helper requirement differs from the pin")
+    entitlements = command(["/usr/bin/codesign", "--display", "--entitlements", ":-", bundle]).stdout
+    require(not entitlements.strip() or plistlib.loads(entitlements) == {}, "the vault service must have no entitlements")
+    with tempfile.TemporaryDirectory(prefix="agentswap-vault-public-cert-") as temporary:
+        prefix = Path(temporary) / "certificate"
+        command(["/usr/bin/codesign", "--display", "--extract-certificates", prefix, bundle])
+        require((Path(str(prefix) + "0")).read_bytes() == regular_bytes(certificate, 64 * 1024), "helper signing certificate differs from the public DER pin")
+    binary = bundle / "Contents/MacOS" / EXECUTABLE
+    require(set(command(["/usr/bin/lipo", "-archs", binary]).stdout.decode().split()) == {"arm64", "x86_64"}, "helper must contain exactly arm64 and x86_64")
+    for arch in ("arm64", "x86_64"):
+        signing = command(["/usr/bin/codesign", "--display", "--verbose=4", "--arch", arch, bundle]).stderr.decode()
+        cdhash = re.search(r"^CDHash=([0-9a-f]{40})$", signing, re.MULTILINE)
+        flags = re.search(r"\bflags=(0x[0-9a-f]+)", signing)
+        require(cdhash is not None and cdhash.group(1) == pin["architectures"][arch]["cdhash"], "helper cdhash changed")
+        require(flags is not None and int(flags.group(1), 16) & 0x10002 == 0x10000, "helper must use Hardened Runtime and a certificate signature")
+        build = command(["/usr/bin/xcrun", "vtool", "-arch", arch, "-show-build", binary]).stdout.decode()
+        minimum = re.search(r"\bminos\s+([0-9.]+)", build)
+        require(minimum is not None and minimum.group(1) in {"14.0", "14.0.0"}, "helper requires an unexpected macOS version")
+
+
+def extract_archive(archive, destination, pin):
+    data = regular_bytes(archive, MAX_ARCHIVE)
+    require(len(data) == pin["archive"]["size"] and sha256(data) == pin["archive"]["sha256"], "archive differs from the committed pin")
+    require(not destination.exists() and not destination.is_symlink(), "extraction destination already exists")
+    with zipfile.ZipFile(archive) as source:
+        entries = source.infolist()
+        expected = {BUNDLE + "/" + name for name in FILES}
+        require(len(entries) == len(expected) and {entry.filename for entry in entries} == expected, "unexpected or duplicate ZIP entries")
+        for entry in entries:
+            path = PurePosixPath(entry.filename)
+            require(not path.is_absolute() and ".." not in path.parts and "\\" not in entry.filename, "unsafe ZIP path")
+            require(not entry.is_dir() and stat.S_ISREG(entry.external_attr >> 16), "ZIP entries must be regular files")
+            require(not (entry.flag_bits & 1) and entry.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}, "unsupported ZIP encoding")
+            name = "/".join(path.parts[1:])
+            value = pin["files"][name]
+            require(entry.file_size == value["size"] and stat.S_IMODE(entry.external_attr >> 16) == value["mode"], "ZIP member metadata differs from the pin")
+        destination.mkdir(mode=0o755)
+        for entry in entries:
+            name = "/".join(PurePosixPath(entry.filename).parts[1:])
+            value = pin["files"][name]
+            payload = source.read(entry)
+            require(len(payload) == value["size"] and sha256(payload) == value["sha256"], "ZIP member content differs from the pin")
+            target = destination / name
+            target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            with target.open("xb") as output:
+                output.write(payload)
+            target.chmod(value["mode"])
+
+
+class HTTPSRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        require(urllib.parse.urlsplit(newurl).scheme == "https", "non-HTTPS redirect refused")
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+def download(pin, destination):
+    url = pin["archive"].get("url", "")
+    parsed = urllib.parse.urlsplit(url)
+    require(parsed.scheme == "https" and parsed.netloc == "github.com" and not parsed.query and not parsed.fragment, "a public GitHub release asset URL is required")
+    require(re.fullmatch(r"/mercen-lee/agent-swap/releases/download/[^/]+/" + re.escape(pin["archive"]["name"]), parsed.path), "unexpected public asset URL")
+    opener = urllib.request.build_opener(HTTPSRedirects())
+    request = urllib.request.Request(url, headers={"User-Agent": "AgentSwap-vault-artifact-verifier/1"})
+    with opener.open(request, timeout=60) as response, destination.open("xb") as output:
+        total = 0
+        while chunk := response.read(64 * 1024):
+            total += len(chunk)
+            require(total <= pin["archive"]["size"], "download exceeds the pinned archive size")
+            output.write(chunk)
+    require(total == pin["archive"]["size"], "incomplete vault archive download")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pin", type=Path, required=True)
+    parser.add_argument("--certificate", type=Path, default=ROOT / "scripts/signing/release-certificate.cer")
+    targets = parser.add_mutually_exclusive_group(required=True)
+    targets.add_argument("--destination", type=Path)
+    targets.add_argument("--verify-bundle", type=Path)
+    parser.add_argument("--archive", type=Path)
+    args = parser.parse_args()
+    pin = load_manifest(args.pin, args.certificate)
+    if args.verify_bundle:
+        require(args.archive is None, "--archive requires --destination")
+        verify_bundle(args.verify_bundle, pin, args.certificate)
+    else:
+        destination = args.destination
+        require(destination.name == BUNDLE and not destination.exists() and not destination.is_symlink(), "a new AgentSwapVaultService.xpc destination is required")
+        parent = destination.parent.resolve(strict=True)
+        with tempfile.TemporaryDirectory(prefix="agentswap-frozen-vault-", dir=parent) as temporary:
+            temporary = Path(temporary)
+            archive = args.archive
+            if archive is None:
+                archive = temporary / pin["archive"]["name"]
+                download(pin, archive)
+            staged = temporary / BUNDLE
+            extract_archive(archive, staged, pin)
+            verify_bundle(staged, pin, args.certificate)
+            # copytree creates the destination exclusively. Never replace an
+            # existing service, and verify again after the final copy.
+            shutil.copytree(staged, parent / BUNDLE, symlinks=False)
+            verify_bundle(parent / BUNDLE, pin, args.certificate)
+    print("Frozen vault service: public hash, signature, architecture and file checks passed.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile, plistlib.InvalidFileException) as error:
+        print(f"Vault artifact verification: {error}", file=sys.stderr)
+        sys.exit(1)

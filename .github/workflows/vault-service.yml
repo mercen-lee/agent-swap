@@ -1,0 +1,63 @@
+name: Bootstrap frozen vault service
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact reviewed source commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-service-bootstrap-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      AGENTSWAP_VAULT_SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+      - name: Verify exact source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AGENTSWAP_VAULT_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$AGENTSWAP_VAULT_SOURCE_COMMIT" ]]
+          test -z "$(git status --porcelain --untracked-files=normal)"
+      - name: Test Core
+        timeout-minutes: 5
+        run: ./scripts/test-core.sh
+      - name: Test frozen artifact validation
+        run: python3 scripts/test-vault-service-artifact.py
+      - name: Prove isolated vault security boundary
+        timeout-minutes: 5
+        run: ./scripts/test-vault-service-security.sh
+      - name: Import dedicated release signing identity
+        env:
+          AGENTSWAP_SIGNING_P12_BASE64: ${{ secrets.AGENTSWAP_SIGNING_P12_BASE64 }}
+          AGENTSWAP_SIGNING_P12_PASSWORD: ${{ secrets.AGENTSWAP_SIGNING_P12_PASSWORD }}
+        run: python3 scripts/prepare-release-signing.py prepare
+      - name: Package frozen Universal XPC service
+        run: ./scripts/package-vault-service.sh build/vault-service-bootstrap
+      - name: Delete temporary signing keychain
+        if: always()
+        run: python3 scripts/prepare-release-signing.py cleanup
+      - name: Upload review artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vault-service-${{ inputs.source_commit }}-${{ github.run_id }}
+          path: |
+            build/vault-service-bootstrap/*.zip
+            build/vault-service-bootstrap/*.json
+          if-no-files-found: error
+          retention-days: 30

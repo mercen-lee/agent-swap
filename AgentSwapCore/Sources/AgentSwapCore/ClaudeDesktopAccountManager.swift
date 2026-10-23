@@ -109,7 +109,7 @@ public actor ClaudeDesktopAccountManager: ClaudeDesktopAccountManaging {
     private var operating = false
 
     public init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
-                keychain: any KeychainAccess = SystemKeychainAccess(),
+                keychain: any KeychainAccess = AppVaultKeychainAccess(),
                 processes: any ClaudeDesktopConversationProcessControlling = SystemClaudeDesktopConversationProcessController(),
                 files: (any ClaudeDesktopAuthFileAccess)? = nil,
                 loginVerifier: any ClaudeDesktopLoginVerifying = SystemClaudeDesktopLoginVerifier(),

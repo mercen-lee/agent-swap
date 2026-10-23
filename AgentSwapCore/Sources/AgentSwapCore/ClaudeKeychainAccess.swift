@@ -47,8 +47,9 @@ private struct DefaultNativeKeychainLockStatus: NativeKeychainLockChecking {
     }
 }
 
-/// Only Claude's native credential service uses Apple's reader/writer identity. The application
-/// vault, recovery records and Codex credentials continue to use the native Swift Security store.
+/// Only Claude's native credential service uses Apple's reader/writer identity.
+/// Application records delegate to their fixed service; Codex native credentials
+/// retain the native Swift Security store.
 public struct ClaudeKeychainAccess: KeychainAccess, KeychainWritePreflighting {
     private let fallback: any KeychainAccess
     private let runner: any NativeSecurityRunning
@@ -57,7 +58,7 @@ public struct ClaudeKeychainAccess: KeychainAccess, KeychainWritePreflighting {
     private let interactionGate: KeychainInteractionGate
 
     public init() {
-        self.init(fallback: SystemKeychainAccess(), runner: SystemNativeSecurityRunner(),
+        self.init(fallback: AppVaultKeychainAccess(), runner: SystemNativeSecurityRunner(),
                   lockStatus: DefaultNativeKeychainLockStatus())
     }
     init(fallback: any KeychainAccess, runner: any NativeSecurityRunning,

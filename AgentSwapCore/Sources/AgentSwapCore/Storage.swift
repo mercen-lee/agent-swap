@@ -116,7 +116,7 @@ public struct SystemKeychainAccess: KeychainAccess {
 public actor KeychainSecretStore: SecretStore {
     public static let service = "net.mercen.agentswap"
     private let keychain: any KeychainAccess
-    public init(keychain: any KeychainAccess = SystemKeychainAccess()) { self.keychain = keychain }
+    public init(keychain: any KeychainAccess = AppVaultKeychainAccess()) { self.keychain = keychain }
     public func load(accountID: UUID) throws -> Credential? {
         guard let data = try keychain.read(service: Self.service, account: accountID.uuidString) else { return nil }
         do { return try JSONDecoder().decode(Credential.self, from: data) }
