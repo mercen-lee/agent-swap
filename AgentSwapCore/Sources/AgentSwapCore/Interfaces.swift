@@ -30,6 +30,9 @@ public protocol ProviderAdapter: Sendable {
     func importCurrentIfPresent() async throws -> ImportedAccount?
     /// Restores only authenticated, grant-bound identity evidence from the private vault.
     func registerStoredCredential(_ credential: Credential, account: AccountRecord) async
+    /// Restores scoped server deadlines before the adapter can make a matching HTTP request.
+    func restoreRequestRateLimits(_ limits: [ProviderRequestRateLimit]) async
+    func activeRequestRateLimits() async -> [ProviderRequestRateLimit]
     func login() async throws -> ImportedAccount
     func cancelLogin() async
     /// A validated CLI fallback URL stays private to the runner and opens only on explicit request.
@@ -65,6 +68,8 @@ public extension ProviderAdapter {
         throw IndependentCredentialRefreshBlocked(message: "재로그인한 인증은 CLI·Desktop에 적용하지 않았습니다. 적용하려면 별도로 계정을 전환해 주세요.")
     }
     func registerStoredCredential(_ credential: Credential, account: AccountRecord) async {}
+    func restoreRequestRateLimits(_ limits: [ProviderRequestRateLimit]) async {}
+    func activeRequestRateLimits() async -> [ProviderRequestRateLimit] { [] }
     func verifyCredential(_ credential: Credential, account: AccountRecord) async throws -> Credential { credential }
     func importCurrentIfPresent() async throws -> ImportedAccount? { try await importCurrent() }
     func canOpenLoginPage() async -> Bool { false }

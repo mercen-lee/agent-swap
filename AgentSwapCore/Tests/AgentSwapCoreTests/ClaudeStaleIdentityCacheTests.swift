@@ -112,7 +112,9 @@ struct ClaudeStaleIdentityCacheTests {
             else { #expect(status != 401) }
         }
         await #expect(throws: AgentSwapError.self) { try await adapter.importCurrent() }
-        #expect(await fixture.transport.paths == Array(repeating: "/api/oauth/profile", count: status == 401 ? 1 : 2))
+        // Both an exact-token 401 and a still-active 429 suppress the second request;
+        // neither response allows the unverified native identity cache to identify it.
+        #expect(await fixture.transport.paths == Array(repeating: "/api/oauth/profile", count: [401, 429].contains(status) ? 1 : 2))
         #expect(try Data(contentsOf: fixture.store.configURL) == fixture.configData)
         #expect(fixture.keychain.read(service: fixture.store.keychainService, account: fixture.store.keychainAccount) == fixture.native.rawAuth)
     }

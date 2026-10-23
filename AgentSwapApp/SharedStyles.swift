@@ -88,7 +88,7 @@ struct UsageRateLimitNotice: View {
             Image(systemName: "clock")
         }
         .font(.caption).foregroundStyle(.orange)
-        .help("서버가 지정한 시각 이후 자동으로 다시 조회합니다. 저장된 인증과 마지막 정상 조회값을 유지합니다.")
+        .help("재시도 시각 이후 자동으로 다시 조회합니다. 저장된 인증과 마지막 정상 조회값을 유지합니다.")
     }
 }
 

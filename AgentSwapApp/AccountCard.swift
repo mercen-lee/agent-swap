@@ -164,7 +164,8 @@ struct AccountDetailView: View {
                 }
                 if let retry = UsagePresentation.rateLimitRetry(cache: cache, providerRetryAfter: providerRetryAfter) {
                     Label("서버 조회 제한으로 대기 중", systemImage: "clock").foregroundStyle(.orange)
-                    Text("서버가 지정한 시각 이후 자동으로 다시 조회합니다. 저장된 인증과 마지막 정상 조회값을 유지합니다.")
+                    Text(cache?.requestRateLimit.flatMap { $0.retryAfter == retry ? AgentSwapError.requestRateLimited($0).localizedDescription : nil }
+                         ?? "재시도 시각 이후 자동으로 다시 조회합니다. 저장된 인증과 마지막 정상 조회값을 유지합니다.")
                         .font(.caption).foregroundStyle(.secondary)
                     LabeledContent("재시도 시각") { Text(retry, format: .dateTime.month().day().hour().minute()) }
                 } else if let error = cache?.error {

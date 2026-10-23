@@ -9,7 +9,9 @@ struct AgentSwapApp: App {
     @State private var model = AgentSwapApp.isDemo
         ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible,
                            claudeRecoveryConflict: AgentSwapApp.isDemo && CommandLine.arguments.contains("--demo-recovery-conflict"),
-                           rateLimited: CommandLine.arguments.contains("--demo-rate-limited"))
+                           rateLimited: CommandLine.arguments.contains("--demo-rate-limited"),
+                           scopedRateLimited: AgentSwapApp.isDemo && (CommandLine.arguments.contains("--demo-scoped-rate-limited") ||
+                               Bundle.main.object(forInfoDictionaryKey: "AgentSwapDemoScopedRateLimited") as? Bool == true))
         : AppModel.live()
     @StateObject private var updater = AppUpdater(isDemo: AgentSwapApp.isDemo)
     @State private var isAuthorizingSavedAccounts = false

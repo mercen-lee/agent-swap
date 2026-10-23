@@ -15,11 +15,29 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     private var verifiedMetadata: [VerifiedGrant: Data] = [:]
     private var verifiedTokenOrder: [VerifiedGrant] = []
     private var nativeIdentityRetryAfter: [VerifiedGrant: Date] = [:]
+    private var requestRateLimits = ProviderRequestRateLimitGate()
     public init(authStore: ClaudeAuthStore = .init(), transport: any ProviderHTTPTransport = URLSessionProviderTransport(),
                 loginRunner: any ProviderLoginRunner = OfficialCLILoginRunner()) {
         self.authStore = authStore; self.transport = transport; self.loginRunner = loginRunner
     }
     public func compatibility() async -> CompatibilityStatus { await authStore.compatibility() }
+    public func restoreRequestRateLimits(_ limits: [ProviderRequestRateLimit]) {
+        requestRateLimits.restore(limits, provider: provider)
+    }
+    public func activeRequestRateLimits() -> [ProviderRequestRateLimit] { requestRateLimits.active() }
+    private func send(_ request: URLRequest, key: ProviderRequestKey) async throws -> ProviderHTTPResponse {
+        try requestRateLimits.check(key)
+        let response = try await transport.send(request)
+        // Preserve native profile 401 handling below; only typed throttles are handled here.
+        if response.statusCode == 429 {
+            do { _ = try ProviderHTTP.checked(response, rateLimitKey: key) }
+            catch let error as AgentSwapError {
+                if case .requestRateLimited(let limit) = error { requestRateLimits.retain(limit) }
+                throw error
+            }
+        }
+        return response
+    }
     public func recoverInterruptedSwitch() async throws { try await authStore.recoverInterruptedSwitch() }
     public func recoverKeepingCurrentLogin(account: AccountRecord) async throws -> ImportedAccount {
         try await authStore.recoverKeepingCurrentLogin(account: account) { credential in
@@ -67,7 +85,8 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
             throw nativeIdentityUnverified()
         }
         let request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/profile", token: credential.accessToken)
-        let response = try await transport.send(request)
+        let key = ProviderRequestKey.credential(provider: provider, kind: .profile, token: credential.accessToken)
+        let response = try await send(request, key: key)
         if nativeContext, response.statusCode == 401 {
             nativeIdentityRetryAfter[grant] = Date().addingTimeInterval(60)
             if nativeIdentityRetryAfter.count > 64, let oldest = nativeIdentityRetryAfter.min(by: { $0.value < $1.value })?.key {
@@ -75,7 +94,7 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
             }
             throw nativeIdentityUnverified()
         }
-        let profile = try ProviderJSON.object(ProviderHTTP.checked(response))
+        let profile = try ProviderJSON.object(ProviderHTTP.checked(response, rateLimitKey: key))
         guard let user = profile["account"] as? [String: Any], let org = profile["organization"] as? [String: Any],
               let userID = ProviderJSON.nonempty(user["uuid"]), let orgID = ProviderJSON.nonempty(org["uuid"]) else {
             throw AgentSwapError.unsupported("Claude 프로필 응답에서 계정 식별 정보를 찾지 못했습니다.")
@@ -150,6 +169,7 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     private func refreshCredential(_ credential: Credential, account: AccountRecord, requiresInactive: Bool) async throws -> Credential {
         // Reject malformed OAuth metadata without making even a profile request.
         _ = try refreshRequestBody(credential)
+        try requestRateLimits.check(.account(provider: provider, kind: .tokenRefresh, accountID: account.id))
         let verifiedInput = try await verifiedCredential(credential, account: account)
         let native: ImportedAccount?
         if let current = try await authStore.readForIdentificationIfPresent() {
@@ -205,7 +225,9 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         guard let refresh = credential.refreshToken else { throw AgentSwapError.authentication("Claude 갱신 토큰이 없습니다. 다시 로그인하세요.") }
         var root = try ProviderJSON.object(credential.rawAuth)
         guard var oauth = root["claudeAiOauth"] as? [String: Any] else { throw AgentSwapError.unsupported("Claude 인증 형식이 변경되었습니다.") }
-        let response = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(ProviderHTTP.request("https://platform.claude.com/v1/oauth/token", body: body))))
+        let key = ProviderRequestKey.account(provider: provider, kind: .tokenRefresh, accountID: account.id)
+        let response = try ProviderJSON.object(ProviderHTTP.checked(await send(
+            ProviderHTTP.request("https://platform.claude.com/v1/oauth/token", body: body), key: key), rateLimitKey: key))
         guard let access = ProviderJSON.nonempty(response["access_token"]), let lifetime = ProviderJSON.number(response["expires_in"]), lifetime.isFinite, lifetime > 0 else {
             throw AgentSwapError.authentication("Claude 토큰 갱신 응답을 읽지 못했습니다.")
         }
@@ -222,10 +244,12 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
             .withVerifiedClaudeIdentity(account.identity)
     }
     public func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot {
+        let key = ProviderRequestKey.account(provider: provider, kind: .usage, accountID: account.id)
+        try requestRateLimits.check(key)
         let verified = try await verifiedCredential(credential, account: account)
         var request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/usage", token: verified.accessToken)
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        return try ProviderUsageParser.claude(ProviderHTTP.checked(await transport.send(request)))
+        return try ProviderUsageParser.claude(ProviderHTTP.checked(await send(request, key: key), rateLimitKey: key))
     }
     public func activate(_ credential: Credential, account: AccountRecord, relaunch: Bool) async -> SwitchResult {
         await apply(credential, account: account, expectedSourceIdentity: nil, expectedSourceAuth: nil)
@@ -287,11 +311,28 @@ public actor CodexProviderAdapter: ProviderAdapter {
     private let loginRunner: any ProviderLoginRunner
     private let processController: any CodexProcessControlling
     private let terminationTimeout: TimeInterval
+    private var requestRateLimits = ProviderRequestRateLimitGate()
     public init(authStore: CodexAuthStore = .init(), transport: any ProviderHTTPTransport = URLSessionProviderTransport(),
                 loginRunner: any ProviderLoginRunner = OfficialCLILoginRunner(),
                 processController: any CodexProcessControlling = SystemCodexProcessController(), terminationTimeout: TimeInterval = 15) {
         self.authStore = authStore; self.transport = transport; self.loginRunner = loginRunner
         self.processController = processController; self.terminationTimeout = terminationTimeout
+    }
+    public func restoreRequestRateLimits(_ limits: [ProviderRequestRateLimit]) {
+        requestRateLimits.restore(limits, provider: provider)
+    }
+    public func activeRequestRateLimits() -> [ProviderRequestRateLimit] { requestRateLimits.active() }
+    private func send(_ request: URLRequest, key: ProviderRequestKey) async throws -> ProviderHTTPResponse {
+        try requestRateLimits.check(key)
+        let response = try await transport.send(request)
+        if response.statusCode == 429 {
+            do { _ = try ProviderHTTP.checked(response, rateLimitKey: key) }
+            catch let error as AgentSwapError {
+                if case .requestRateLimited(let limit) = error { requestRateLimits.retain(limit) }
+                throw error
+            }
+        }
+        return response
     }
     public func compatibility() async -> CompatibilityStatus {
         let status = await authStore.compatibility()
@@ -311,7 +352,9 @@ public actor CodexProviderAdapter: ProviderAdapter {
     public func refresh(_ credential: Credential, account: AccountRecord) async throws -> Credential {
         guard let refresh = credential.refreshToken else { throw AgentSwapError.authentication("Codex 갱신 토큰이 없습니다. 다시 로그인하세요.") }
         let body = try ProviderJSON.data(["grant_type": "refresh_token", "client_id": "app_EMoamEEZ73f0CkXaXp7hrann", "refresh_token": refresh])
-        let response = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(ProviderHTTP.request("https://auth.openai.com/oauth/token", body: body))))
+        let key = ProviderRequestKey.account(provider: provider, kind: .tokenRefresh, accountID: account.id)
+        let response = try ProviderJSON.object(ProviderHTTP.checked(await send(
+            ProviderHTTP.request("https://auth.openai.com/oauth/token", body: body), key: key), rateLimitKey: key))
         guard let access = ProviderJSON.nonempty(response["access_token"]) else { throw AgentSwapError.authentication("Codex 토큰 갱신 응답을 읽지 못했습니다.") }
         var root = try ProviderJSON.object(credential.rawAuth)
         guard var tokens = root["tokens"] as? [String: Any] else { throw AgentSwapError.unsupported("Codex 인증 형식이 변경되었습니다.") }
@@ -328,7 +371,8 @@ public actor CodexProviderAdapter: ProviderAdapter {
     public func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot {
         var request = ProviderHTTP.request("https://chatgpt.com/backend-api/wham/usage", token: credential.accessToken)
         request.setValue(account.identity.workspaceID, forHTTPHeaderField: "ChatGPT-Account-Id")
-        return try ProviderUsageParser.codex(ProviderHTTP.checked(await transport.send(request)))
+        let key = ProviderRequestKey.account(provider: provider, kind: .usage, accountID: account.id)
+        return try ProviderUsageParser.codex(ProviderHTTP.checked(await send(request, key: key), rateLimitKey: key))
     }
     public func hasRunningConsumers() async -> Bool {
         let scan = await processController.scan()

@@ -8,7 +8,7 @@ public extension AppModel {
 
     /// In-memory, deterministic fixture mode. Never reads or writes provider authentication.
     static func preview(claudeSessionIncompatible: Bool = false, claudeRecoveryConflict: Bool = false,
-                        rateLimited: Bool = false) -> AppModel {
+                        rateLimited: Bool = false, scopedRateLimited: Bool = false) -> AppModel {
         let now = Date()
         var state = PersistedState()
         let claudePersonal = AccountRecord(identity: .init(provider: .claude, userID: "demo-claude-1", workspaceID: "personal"), nickname: "개인 계정", email: "personal@example.com", workspaceName: "개인 워크스페이스", plan: "Max", createdAt: now.addingTimeInterval(-300), automaticSwitchEligible: true)
@@ -34,6 +34,15 @@ public extension AppModel {
             state.usage[claudePersonal.id]?.error = AgentSwapError.rateLimited(retry).localizedDescription
             state.usage[claudePersonal.id]?.retryAfter = retry
             state.usage[claudePersonal.id]?.retryReason = .serverRateLimit
+        }
+        if scopedRateLimited {
+            let limit = ProviderRequestRateLimit(key: .credential(provider: .claude, kind: .profile, token: "demo-only-profile"),
+                                                 retryAfter: now.addingTimeInterval(300), source: .fallback)
+            state.requestRateLimits = [limit]
+            state.usage[claudePersonal.id]?.error = AgentSwapError.requestRateLimited(limit).localizedDescription
+            state.usage[claudePersonal.id]?.retryAfter = limit.retryAfter
+            state.usage[claudePersonal.id]?.retryReason = .serverRateLimit
+            state.usage[claudePersonal.id]?.requestRateLimit = limit
         }
         let credential = Credential(accessToken: "demo-only", expiresAt: now.addingTimeInterval(3600), rawAuth: Data())
         let credentials = Dictionary(uniqueKeysWithValues: state.accounts.map { ($0.id, credential) })

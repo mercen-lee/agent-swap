@@ -80,10 +80,12 @@ public struct UsageCache: Codable, Equatable, Sendable {
     public var error: String?
     public var retryAfter: Date?
     public var retryReason: UsageRetryReason?
+    public var requestRateLimit: ProviderRequestRateLimit?
     public init(snapshot: UsageSnapshot? = nil, attemptedAt: Date? = nil, error: String? = nil, retryAfter: Date? = nil,
-                retryReason: UsageRetryReason? = nil) {
+                retryReason: UsageRetryReason? = nil, requestRateLimit: ProviderRequestRateLimit? = nil) {
         self.snapshot = snapshot; self.attemptedAt = attemptedAt; self.error = error; self.retryAfter = retryAfter
         self.retryReason = retryReason
+        self.requestRateLimit = requestRateLimit
     }
 }
 public struct Credential: Codable, Equatable, Sendable {
@@ -139,6 +141,8 @@ public struct PersistedState: Codable, Equatable, Sendable {
     public var usage: [UUID: UsageCache] = [:]
     /// A provider throttle applies to every account, including after an application restart.
     public var providerRetryAfter: [Provider: Date]? = nil
+    /// Request-specific deadlines contain only account IDs or one-way credential fingerprints.
+    public var requestRateLimits: [ProviderRequestRateLimit]? = nil
     public var lastSwitch: [Provider: Date] = [:]
     /// Non-secret before-image hashes keep a rotated grant from being overwritten by stale native auth.
     public var pendingNativeRefreshPredecessor: [UUID: String]? = nil
@@ -148,11 +152,12 @@ public struct PersistedState: Codable, Equatable, Sendable {
     public init() {}
 }
 public enum AgentSwapError: Error, LocalizedError, Sendable, Equatable {
-    case unsupported(String), authentication(String), storage(String), nativeIdentityUnverified(String), network(String), rateLimited(Date), cancelled
+    case unsupported(String), authentication(String), storage(String), nativeIdentityUnverified(String), network(String), rateLimited(Date), requestRateLimited(ProviderRequestRateLimit), cancelled
     public var errorDescription: String? {
         switch self {
         case .unsupported(let s), .authentication(let s), .storage(let s), .nativeIdentityUnverified(let s), .network(let s): s
         case .rateLimited: "요청 한도에 도달했습니다. 재시도 시각까지 기다립니다."
+        case .requestRateLimited(let limit): limit.message
         case .cancelled: "로그인이 취소되었습니다."
         }
     }
