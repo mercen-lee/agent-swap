@@ -10,6 +10,7 @@ import plistlib
 import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import warnings
@@ -108,6 +109,51 @@ class ArtifactValidationTests(unittest.TestCase):
             with self.assertRaises(RequirementCaptured):
                 ARTIFACT.verify_bundle(bundle, self.pin, self.certificate)
             mocked.assert_called_once()
+
+    def test_codesign_lowercase_hex_requirement_is_accepted(self):
+        requirement = self.pin["designatedRequirement"]
+        actual = "designated => " + requirement.replace(self.pin["certificateSHA1"], self.pin["certificateSHA1"].lower())
+        ARTIFACT.verify_designated_requirement(actual, requirement)
+
+    def test_certificate_extraction_optional_prefix_is_attached_to_option(self):
+        bundle = self.extract()
+
+        class ExtractionCaptured(Exception):
+            pass
+
+        def capture(arguments):
+            if any(str(value).startswith("--extract-certificates") for value in arguments):
+                self.assertEqual(len(arguments), 4)
+                self.assertTrue(str(arguments[2]).startswith("--extract-certificates="))
+                self.assertTrue(str(arguments[2]).endswith("/certificate"))
+                self.assertEqual(arguments[3], bundle)
+                raise ExtractionCaptured
+            if "--requirements" in arguments:
+                return SimpleNamespace(stdout=("designated => " + self.pin["designatedRequirement"]).encode(), stderr=b"")
+            return SimpleNamespace(stdout=b"", stderr=b"")
+
+        with patch.object(ARTIFACT, "command", side_effect=capture):
+            with self.assertRaises(ExtractionCaptured):
+                ARTIFACT.verify_bundle(bundle, self.pin, self.certificate)
+
+    def test_codesign_extra_or_clause_and_identifier_case_are_rejected(self):
+        requirement = self.pin["designatedRequirement"]
+        lowercase = "designated => " + requirement.replace(self.pin["certificateSHA1"], self.pin["certificateSHA1"].lower())
+        for actual in (lowercase + " or anchor apple", lowercase.replace(ARTIFACT.IDENTIFIER, ARTIFACT.IDENTIFIER.upper())):
+            with self.subTest(actual=actual):
+                with self.assertRaisesRegex(ValueError, "requirement differs"):
+                    ARTIFACT.verify_designated_requirement(actual, requirement)
+
+    def test_failed_public_verification_has_bounded_diagnostics(self):
+        failed = SimpleNamespace(returncode=1, stdout=b"", stderr=b"public diagnostic " * 1024)
+        with patch.object(ARTIFACT.subprocess, "run", return_value=failed):
+            with self.assertRaises(ValueError) as result:
+                ARTIFACT.command(["/usr/bin/codesign", "--verify", "synthetic.xpc"])
+            self.assertIn("public diagnostic", str(result.exception))
+            self.assertLess(len(str(result.exception)), 2100)
+            with self.assertRaises(ValueError) as hidden:
+                ARTIFACT.command(["/usr/bin/security", "synthetic-command"])
+            self.assertEqual(str(hidden.exception), "public verification failed: security")
 
     def test_archive_byte_change_rejected_before_extraction(self):
         with self.archive.open("ab") as output:

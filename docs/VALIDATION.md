@@ -16,7 +16,9 @@
 
 최종 전체 Core **525개 테스트·51개 스위트**가 5.791초에 통과했습니다. Release 앱 컴파일·deep/strict 서명 검사와 diff 검사를 통과했습니다. 이 앱 컴파일은 아직 배포 서비스가 조립되지 않은 단계이며 실행·설치하지 않았습니다.
 
-첫 CI의 Core·IPC 보안 검증은 통과했으나 공개 패키지 검사에서 `codesign -R`의 inline 요구사항 구문이 파일 경로로 해석돼 공개 전 중단됐습니다. `=` prefix를 명시하고 argv 회귀를 추가했습니다. source pin의 nil·중복·불일치·주석 decoy 거부와 이 회귀를 포함해 아티팩트 합성 테스트 **19개**가 통과했습니다. 이 실패에서 설치 앱·실계정은 변경하지 않았고 임시 CI signing Keychain 정리는 성공했습니다.
+공개 전 CI의 Core·IPC 보안 검증은 통과했으나 패키지 검증기의 `codesign` 인자와 DR 출력 비교 오류로 중단됐습니다. inline 요구사항의 `=` prefix, 인증서 추출의 attached 인자, H"hex" 내부만의 대소문자 정규화를 반영했습니다. ID·연산자·추가 OR 조건은 계속 정확히 비교합니다. source pin의 nil·중복·불일치·주석 decoy 거부와 명령 회귀를 포함해 아티팩트 합성 테스트 **23개**가 통과했습니다. 실패한 CI에서 설치 앱·실계정은 변경하지 않았고 임시 signing Keychain 정리는 성공했습니다.
+
+검증기 전체를 임시 합성 인증서로 서명한 실제 Universal XPC 파일에 실행했습니다. 프로덕션 Info.plist, 양쪽 아키텍처의 macOS 14·Hardened Runtime·무 entitlements 조건으로 `load_manifest → verify_bundle → ZIP 복원 → verify_bundle` 모두 5.64초에 통과했습니다. 실제 codesign·lipo·vtool을 사용했으며 임시 Keychain·디렉터리 삭제와 기본 Keychain·검색 목록 불변도 확인했습니다. 이 단계는 실제 배포 인증서의 최종 아티팩트 확인과 구분합니다.
 
 현재 설치본은 아래에서 복구한 beta.12 그대로입니다. 새 서비스의 단회 CI 서명·아티팩트 고정·패키징 통합과 실제 설치 이행·새 조회는 아직 수행하지 않았습니다. 새 서비스가 기존 항목에 처음 접근할 때 항목별 사용자 승인이 필요할 수 있으며, 이를 이미 끝난 것으로 표시하지 않습니다. 실제 Desktop 세션과 계정 인증은 이 개발 검증에 사용하지 않았습니다.
 

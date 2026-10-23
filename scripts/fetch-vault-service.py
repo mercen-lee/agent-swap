@@ -37,7 +37,21 @@ def sha256(data):
 
 def command(arguments):
     result = subprocess.run([str(value) for value in arguments], capture_output=True)
-    require(result.returncode == 0, f"public verification failed: {Path(arguments[0]).name}")
+    if result.returncode:
+        message = f"public verification failed: {Path(arguments[0]).name}"
+        # These operations inspect public code only. Keep bounded diagnostics for
+        # packaging failures without turning this into a generic secret logger.
+        public = ((str(arguments[0]) == "/usr/bin/codesign" and
+                   ("--verify" in arguments or "--display" in arguments) and
+                   "--sign" not in arguments and "-s" not in arguments) or
+                  str(arguments[0]) == "/usr/bin/lipo" and "-archs" in arguments or
+                  str(arguments[0]) == "/usr/bin/xcrun" and "vtool" in arguments)
+        if public:
+            detail = result.stderr[:8192].decode("utf-8", errors="replace")
+            detail = "".join(char for char in detail if char.isprintable() or char in "\n\t").strip()[:2048]
+            if detail:
+                message += ": " + detail
+        raise ValueError(message)
     return result
 
 
@@ -225,6 +239,15 @@ def verify_files(bundle, pin):
     require(info == expected, "unexpected XPC bundle metadata")
 
 
+def verify_designated_requirement(actual, expected):
+    # codesign prints certificate/CDHash literals in lowercase. Normalize only
+    # hex literal spelling: identifiers, operators, and extra clauses stay exact.
+    def normalize(value):
+        return re.sub(r'H"([0-9a-fA-F]{40})"', lambda match: 'H"' + match.group(1).lower() + '"', value)
+
+    require(normalize(actual) == normalize("designated => " + expected), "embedded helper requirement differs from the pin")
+
+
 def verify_bundle(bundle, pin, certificate):
     verify_files(bundle, pin)
     requirement = pin["designatedRequirement"]
@@ -232,12 +255,12 @@ def verify_bundle(bundle, pin, certificate):
     # literal requirement source, independently of the embedded DR display format.
     command(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "-R", "=" + requirement, bundle])
     actual = command(["/usr/bin/codesign", "--display", "--requirements", "-", bundle]).stdout.decode().strip()
-    require(actual == "designated => " + requirement, "embedded helper requirement differs from the pin")
+    verify_designated_requirement(actual, requirement)
     entitlements = command(["/usr/bin/codesign", "--display", "--entitlements", ":-", bundle]).stdout
     require(not entitlements.strip() or plistlib.loads(entitlements) == {}, "the vault service must have no entitlements")
     with tempfile.TemporaryDirectory(prefix="agentswap-vault-public-cert-") as temporary:
         prefix = Path(temporary) / "certificate"
-        command(["/usr/bin/codesign", "--display", "--extract-certificates", prefix, bundle])
+        command(["/usr/bin/codesign", "--display", "--extract-certificates=" + str(prefix), bundle])
         require((Path(str(prefix) + "0")).read_bytes() == regular_bytes(certificate, 64 * 1024), "helper signing certificate differs from the public DER pin")
     binary = bundle / "Contents/MacOS" / EXECUTABLE
     require(set(command(["/usr/bin/lipo", "-archs", binary]).stdout.decode().split()) == {"arm64", "x86_64"}, "helper must contain exactly arm64 and x86_64")
