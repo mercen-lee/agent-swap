@@ -1,7 +1,8 @@
 import Foundation
 import CryptoKit
 
-/// Evidence created after the fixed OAuth profile endpoint authenticates a grant.
+/// Evidence created after the fixed OAuth profile endpoint authenticates a grant,
+/// or the fixed OAuth token endpoint exchanges an already verified refresh grant.
 /// It is stored only inside the Keychain Credential. Native metadata is merely a cache.
 public struct ClaudeCredentialIdentityBinding: Codable, Equatable, Sendable {
     public let version: Int
@@ -28,8 +29,10 @@ public extension Credential {
         return binding.identity
     }
 
-    /// Call only with identity supplied by an authenticated profile response, or an
-    /// already validated binding for this exact grant; cached oauthAccount is insufficient.
+    /// Call only with identity supplied by an authenticated profile response, an
+    /// already validated binding for this exact grant, or a successful fixed-endpoint
+    /// refresh exchange of a verified grant belonging to that identity. Cached
+    /// oauthAccount is insufficient.
     func withVerifiedClaudeIdentity(_ identity: AccountIdentity) throws -> Credential {
         guard identity.provider == .claude, let digest = claudeGrantDigest,
               let parsed = try? CredentialParser.claude(rawAuth: rawAuth, accountMetadata: accountMetadata),

@@ -159,12 +159,16 @@ struct MenuBarView: View {
                 } else {
                     ForEach(snapshot.commonWindows) { window in UsageProgress(window: window, compact: true) }
                 }
-                if model.state.usage[active.id]?.error != nil {
+                if let retry = UsagePresentation.rateLimitRetry(cache: model.state.usage[active.id], providerRetryAfter: model.state.providerRetryAfter?[provider]) {
+                    UsageRateLimitNotice(retryAfter: retry)
+                } else if model.state.usage[active.id]?.error != nil {
                     Label("조회 실패 · 마지막 정상 값", systemImage: "exclamationmark.circle")
                         .font(.caption).foregroundStyle(.orange)
                 }
             } else {
-                if let active, let error = model.state.usage[active.id]?.error {
+                if let retry = UsagePresentation.rateLimitRetry(cache: active.flatMap { model.state.usage[$0.id] }, providerRetryAfter: model.state.providerRetryAfter?[provider]) {
+                    UsageRateLimitNotice(retryAfter: retry)
+                } else if let active, let error = model.state.usage[active.id]?.error {
                     Label(error, systemImage: "exclamationmark.circle")
                         .font(.caption).foregroundStyle(.orange)
                 } else {

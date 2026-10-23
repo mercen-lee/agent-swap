@@ -112,7 +112,7 @@ struct ClaudeStaleIdentityCacheTests {
             else { #expect(status != 401) }
         }
         await #expect(throws: AgentSwapError.self) { try await adapter.importCurrent() }
-        #expect(await fixture.transport.paths == ["/api/oauth/profile", "/api/oauth/profile"])
+        #expect(await fixture.transport.paths == Array(repeating: "/api/oauth/profile", count: status == 401 ? 1 : 2))
         #expect(try Data(contentsOf: fixture.store.configURL) == fixture.configData)
         #expect(fixture.keychain.read(service: fixture.store.keychainService, account: fixture.store.keychainAccount) == fixture.native.rawAuth)
     }
@@ -195,7 +195,7 @@ struct ClaudeStaleIdentityCacheTests {
         #expect(try Data(contentsOf: fixture.store.configURL) == fixture.configData)
     }
 
-    @Test("A profile failure after rotation retains the durable successor without replaying OAuth on the next poll")
+    @Test("A verified OAuth successor retains its owner without another profile request")
     @MainActor func successorSurvivesProfileFailure() async throws {
         let fixture = try StaleIdentityFixture()
         defer { fixture.cleanup() }
@@ -212,12 +212,14 @@ struct ClaudeStaleIdentityCacheTests {
         await model.refreshDue(force: true)
         let successor = try #require(try await vault.load(accountID: account.id))
         #expect(successor.accessToken == "fixture-native-successor")
-        #expect(model.state.usage[account.id]?.error != nil)
+        #expect(successor.verifiedClaudeAccountIdentity == account.identity)
+        #expect(model.state.usage[account.id]?.error == nil)
         #expect(model.state.accounts.first?.authenticationState == .valid)
         await model.refreshDue(force: true, now: Date().addingTimeInterval(61))
         #expect(try await vault.load(accountID: account.id)?.accessToken == successor.accessToken)
         #expect(await fixture.transport.paths.filter { $0 == "/v1/oauth/token" }.count == 1)
-        #expect(!(await fixture.transport.paths).contains("/api/oauth/usage"))
+        #expect(await fixture.transport.paths.filter { $0 == "/api/oauth/profile" }.count == 1)
+        #expect(await fixture.transport.paths.filter { $0 == "/api/oauth/usage" }.count == 2)
     }
 
     @Test("A stale native cache neither conflicts with a different saved successor nor strands the real owner at expiry")

@@ -226,6 +226,7 @@ struct DashboardView: View {
                     AccountRow(
                         account: account,
                         cache: model.state.usage[account.id],
+                        providerRetryAfter: model.state.providerRetryAfter?[account.provider],
                         isActive: model.state.activeAccounts[account.provider] == account.id,
                         isPending: model.pendingSwitch[account.provider] == account.id,
                         isSelected: selectedID == account.id
@@ -357,6 +358,7 @@ struct DashboardView: View {
             AccountDetailView(
                 account: account,
                 cache: model.state.usage[account.id],
+                providerRetryAfter: model.state.providerRetryAfter?[account.provider],
                 isActive: model.state.activeAccounts[account.provider] == account.id,
                 isPending: model.pendingSwitch[account.provider] == account.id,
                 needsSessionRecovery: model.claudeSessionRecoveryRequired,

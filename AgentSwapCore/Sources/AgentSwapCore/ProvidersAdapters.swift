@@ -14,6 +14,7 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     // private actor state, never a trust decision based on the CLI's account cache.
     private var verifiedMetadata: [VerifiedGrant: Data] = [:]
     private var verifiedTokenOrder: [VerifiedGrant] = []
+    private var nativeIdentityRetryAfter: [VerifiedGrant: Date] = [:]
     public init(authStore: ClaudeAuthStore = .init(), transport: any ProviderHTTPTransport = URLSessionProviderTransport(),
                 loginRunner: any ProviderLoginRunner = OfficialCLILoginRunner()) {
         self.authStore = authStore; self.transport = transport; self.loginRunner = loginRunner
@@ -54,17 +55,25 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
     private func identify(_ input: Credential, forceProfile: Bool = false, nativeContext: Bool = false) async throws -> ImportedAccount {
         try validateCredentialTokens(input)
         var credential = input
-        if !forceProfile, let metadata = verifiedMetadata[VerifiedGrant(input)] {
+        let grant = VerifiedGrant(input)
+        if !forceProfile, let metadata = verifiedMetadata[grant] {
             credential.accountMetadata = metadata
             let account = try ProviderAccountParser.claude(credential).account
             try validateProfileOrganization(credential, identity: account.identity)
             credential = try credential.withVerifiedClaudeIdentity(account.identity)
             return try ProviderAccountParser.claude(credential)
         }
+        if nativeContext, !forceProfile, let retry = nativeIdentityRetryAfter[grant], retry > Date() {
+            throw nativeIdentityUnverified()
+        }
         let request = ProviderHTTP.request("https://api.anthropic.com/api/oauth/profile", token: credential.accessToken)
         let response = try await transport.send(request)
         if nativeContext, response.statusCode == 401 {
-            throw AgentSwapError.nativeIdentityUnverified("현재 Claude 로그인 계정을 확인하지 못해 갱신을 보류했습니다. 공식 앱의 로그인을 확인한 뒤 다시 조회해 주세요.")
+            nativeIdentityRetryAfter[grant] = Date().addingTimeInterval(60)
+            if nativeIdentityRetryAfter.count > 64, let oldest = nativeIdentityRetryAfter.min(by: { $0.value < $1.value })?.key {
+                nativeIdentityRetryAfter.removeValue(forKey: oldest)
+            }
+            throw nativeIdentityUnverified()
         }
         let profile = try ProviderJSON.object(ProviderHTTP.checked(response))
         guard let user = profile["account"] as? [String: Any], let org = profile["organization"] as? [String: Any],
@@ -80,7 +89,11 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         if let metadata = credential.accountMetadata { rememberVerifiedMetadata(metadata, grant: VerifiedGrant(input)) }
         return try ProviderAccountParser.claude(credential)
     }
+    private nonisolated func nativeIdentityUnverified() -> AgentSwapError {
+        .nativeIdentityUnverified("현재 Claude 로그인 계정을 확인하지 못해 갱신을 보류했습니다. 공식 앱의 로그인을 확인한 뒤 다시 조회해 주세요.")
+    }
     private func rememberVerifiedMetadata(_ metadata: Data, grant: VerifiedGrant) {
+        nativeIdentityRetryAfter.removeValue(forKey: grant)
         verifiedMetadata[grant] = metadata
         verifiedTokenOrder.removeAll { $0 == grant }
         verifiedTokenOrder.append(grant)
@@ -185,12 +198,15 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
                                       "client_id": clientID, "scope": scopes.joined(separator: " ")])
     }
     private func refreshToken(_ credential: Credential, account: AccountRecord) async throws -> Credential {
+        guard credential.verifiedClaudeAccountIdentity == account.identity else {
+            throw AgentSwapError.storage("Claude 갱신 인증의 계정 소유자를 확인하지 못했습니다. 인증을 보존했으므로 현재 로그인을 다시 확인해 주세요.")
+        }
         let body = try refreshRequestBody(credential)
         guard let refresh = credential.refreshToken else { throw AgentSwapError.authentication("Claude 갱신 토큰이 없습니다. 다시 로그인하세요.") }
         var root = try ProviderJSON.object(credential.rawAuth)
         guard var oauth = root["claudeAiOauth"] as? [String: Any] else { throw AgentSwapError.unsupported("Claude 인증 형식이 변경되었습니다.") }
         let response = try ProviderJSON.object(ProviderHTTP.checked(await transport.send(ProviderHTTP.request("https://platform.claude.com/v1/oauth/token", body: body))))
-        guard let access = ProviderJSON.nonempty(response["access_token"]), let lifetime = ProviderJSON.number(response["expires_in"]), lifetime > 0 else {
+        guard let access = ProviderJSON.nonempty(response["access_token"]), let lifetime = ProviderJSON.number(response["expires_in"]), lifetime.isFinite, lifetime > 0 else {
             throw AgentSwapError.authentication("Claude 토큰 갱신 응답을 읽지 못했습니다.")
         }
         oauth["accessToken"] = access
@@ -199,7 +215,11 @@ public actor ClaudeProviderAdapter: ProviderAdapter {
         if let scope = response["scope"] as? String { oauth["scopes"] = scope.split(separator: " ").map(String.init) }
         if let lifetime = ProviderJSON.number(response["refresh_token_expires_in"]) { oauth["refreshTokenExpiresAt"] = Date().addingTimeInterval(lifetime).timeIntervalSince1970 * 1_000 }
         root["claudeAiOauth"] = oauth
+        // The fixed OAuth endpoint authenticated this exact, previously verified refresh
+        // grant. Its successor belongs to the same account. Bind it before the store's
+        // first durable save, so a failed request or sleep cannot lose that evidence.
         return try CredentialParser.claude(rawAuth: ProviderJSON.data(root), accountMetadata: credential.accountMetadata)
+            .withVerifiedClaudeIdentity(account.identity)
     }
     public func fetchUsage(_ credential: Credential, account: AccountRecord) async throws -> UsageSnapshot {
         let verified = try await verifiedCredential(credential, account: account)

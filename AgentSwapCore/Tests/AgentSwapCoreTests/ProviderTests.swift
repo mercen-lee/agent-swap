@@ -153,13 +153,11 @@ struct ProviderTests {
     private func expectClaudeRefreshProof(_ requests: [URLRequest]) {
         #expect(requests.map { $0.url?.absoluteString } == [
             "https://api.anthropic.com/api/oauth/profile",
-            "https://platform.claude.com/v1/oauth/token",
-            "https://api.anthropic.com/api/oauth/profile"
+            "https://platform.claude.com/v1/oauth/token"
         ])
-        #expect(requests.map(\.httpMethod) == ["GET", "POST", "GET"])
+        #expect(requests.map(\.httpMethod) == ["GET", "POST"])
         #expect(requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-access")
         #expect(requests.dropFirst().first?.value(forHTTPHeaderField: "Authorization") == nil)
-        #expect(requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-successor")
     }
     @Test("An optional native import distinguishes absent authentication from unreadable or malformed data", arguments: [Provider.claude, Provider.codex])
     func optionalNativeImport(_ provider: Provider) async throws {
@@ -315,12 +313,12 @@ struct ProviderTests {
         let initial = try fixture.claude()
         let transport = FixtureTransport([
             try fixture.claudeProfile(initial.account),
-            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600,"scope":"user:profile user:inference"}"#.utf8), statusCode: 200),
-            try fixture.claudeProfile(initial.account)
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600,"scope":"user:profile user:inference"}"#.utf8), statusCode: 200)
         ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         let result = try await adapter.refresh(initial.credential, account: initial.account)
         #expect(result.accessToken == "fixture-successor")
+        #expect(result.verifiedClaudeAccountIdentity == initial.account.identity)
         #expect((try ProviderJSON.object(result.rawAuth)["mcpOAuth"] as? [String: String])?["fixture"] == "preserve")
         #expect(result.expiresAt != initial.credential.expiresAt)
         expectClaudeRefreshProof(await transport.requests)
@@ -335,8 +333,7 @@ struct ProviderTests {
         root["claudeAiOauth"] = oauth; credential.rawAuth = try ProviderJSON.data(root)
         let transport = FixtureTransport([
             try fixture.claudeProfile(initial.account),
-            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200),
-            try fixture.claudeProfile(initial.account)
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200)
         ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         let result = try await adapter.refresh(credential, account: initial.account)
@@ -357,8 +354,7 @@ struct ProviderTests {
         root["claudeAiOauth"] = oauth; credential.rawAuth = try ProviderJSON.data(root)
         let transport = FixtureTransport([
             try fixture.claudeProfile(initial.account),
-            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200),
-            try fixture.claudeProfile(initial.account)
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200)
         ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         _ = try await adapter.refresh(credential, account: initial.account)
@@ -379,8 +375,7 @@ struct ProviderTests {
         root["claudeAiOauth"] = oauth; credential.rawAuth = try ProviderJSON.data(root)
         let transport = FixtureTransport([
             try fixture.claudeProfile(initial.account),
-            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200),
-            try fixture.claudeProfile(initial.account)
+            .init(data: Data(#"{"access_token":"fixture-successor","refresh_token":"fixture-next","expires_in":3600}"#.utf8), statusCode: 200)
         ])
         let adapter = ClaudeProviderAdapter(authStore: ClaudeAuthStore(home: fixture.directory, keychain: fixture.keychain), transport: transport, loginRunner: NoLogin())
         let result = try await adapter.refresh(credential, account: initial.account)

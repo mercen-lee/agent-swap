@@ -45,11 +45,37 @@ public final class AppModel {
     public func switchOperationBlockReason(for accountID: UUID) -> String? {
         if let reason = switchOperationBlockReason { return reason }
         guard let target = state.accounts.first(where: { $0.id == accountID }) else { return "전환할 계정이 더 이상 등록되어 있지 않습니다." }
+        if let reason = providerRateLimitBlockReason(target.provider) { return reason }
         if let source = state.activeAccounts[target.provider], source != accountID,
            state.requiresExplicitCredentialApplication?.contains(source) == true {
             return "현재 계정의 재로그인을 먼저 명시적으로 적용하거나 현재 로그인 가져오기로 선택한 뒤 다른 계정으로 전환해 주세요."
         }
         return nil
+    }
+
+    public func providerRetryAfter(_ provider: Provider) -> Date? { state.providerRetryAfter?[provider] }
+
+    private func providerIsRateLimited(_ provider: Provider, now: Date = Date()) -> Bool {
+        state.providerRetryAfter?[provider].map { $0 > max(now, Date()) } ?? false
+    }
+
+    private func providerRateLimitBlockReason(_ provider: Provider) -> String? {
+        guard providerIsRateLimited(provider), let retry = providerRetryAfter(provider) else { return nil }
+        return "\(provider.title)의 서버 요청 제한으로 \(retry.formatted(date: .omitted, time: .standard))까지 조회와 전환을 기다립니다."
+    }
+
+    private func retainProviderRateLimit(_ provider: Provider, retry: Date) {
+        var deadlines = state.providerRetryAfter ?? [:]
+        deadlines[provider] = max(deadlines[provider] ?? .distantPast, retry)
+        state.providerRetryAfter = deadlines
+    }
+
+    private func seedProviderRateLimits() {
+        for account in state.accounts {
+            guard let cache = state.usage[account.id], cache.retryReason == .serverRateLimit,
+                  let retry = cache.retryAfter else { continue }
+            retainProviderRateLimit(account.provider, retry: retry)
+        }
     }
 
     @ObservationIgnored private let adapters: [Provider: any ProviderAdapter]
@@ -97,6 +123,7 @@ public final class AppModel {
         await claudeDesktopProfiles.load()
         do { state = try await store.load() }
         catch { storageHealthy = false; message = "저장 데이터를 읽지 못했습니다. 원본을 보존합니다: \(error.localizedDescription)" }
+        seedProviderRateLimits()
         for provider in Provider.allCases {
             guard let adapter = adapters[provider] else { continue }
             await operations.acquire(provider)
@@ -104,16 +131,21 @@ public final class AppModel {
             // Detect external CLI account changes without implicitly adding accounts.
             do {
                 try await flushPendingCredentials(provider)
-                await registerStoredCredentials(provider, adapter: adapter)
-                let imported = try await adapter.importCurrent()
-                if let id = state.accounts.first(where: { $0.identity == imported.account.identity })?.id {
-                    do {
-                        _ = try await reconcileNative(imported, accountID: id)
-                        if let index = state.accounts.firstIndex(where: { $0.id == id }) { state.accounts[index].authenticationState = .valid }
-                        state.activeAccounts[provider] = id
-                    } catch { message = error.localizedDescription }
-                } else { state.activeAccounts.removeValue(forKey: provider) }
+                if !providerIsRateLimited(provider) {
+                    await registerStoredCredentials(provider, adapter: adapter)
+                    let imported = try await adapter.importCurrent()
+                    if let id = state.accounts.first(where: { $0.identity == imported.account.identity })?.id {
+                        do {
+                            _ = try await reconcileNative(imported, accountID: id)
+                            if let index = state.accounts.firstIndex(where: { $0.id == id }) { state.accounts[index].authenticationState = .valid }
+                            state.activeAccounts[provider] = id
+                        } catch { message = error.localizedDescription }
+                    } else { state.activeAccounts.removeValue(forKey: provider) }
+                }
             } catch {
+                if let error = error as? AgentSwapError, case .rateLimited(let retry) = error {
+                    retainProviderRateLimit(provider, retry: retry)
+                }
                 // Missing permission is not evidence that a cached active account logged out.
                 if let error = error as? AgentSwapError, case .authentication = error {
                     state.activeAccounts.removeValue(forKey: provider)
@@ -208,6 +240,7 @@ public final class AppModel {
         guard storageHealthy, !isPreparingForTermination else { return }
         for account in state.accounts {
             guard !Task.isCancelled, !isPreparingForTermination else { return }
+            if providerIsRateLimited(account.provider, now: now) { continue }
             let cache = state.usage[account.id] ?? .init()
             if let retry = cache.retryAfter, retry > now { continue }
             let interval = state.activeAccounts[account.provider] == account.id ? state.settings.activePollInterval : state.settings.inactivePollInterval
@@ -218,9 +251,12 @@ public final class AppModel {
     }
     private func refreshAccount(_ id: UUID, now: Date) async {
         guard let account = state.accounts.first(where: { $0.id == id }), let adapter = adapters[account.provider] else { return }
+        guard !providerIsRateLimited(account.provider, now: now) else { return }
         await operations.acquire(account.provider)
         beginOperation()
-        if Task.isCancelled || isPreparingForTermination { await finishOperation(account.provider); return }
+        if Task.isCancelled || isPreparingForTermination || providerIsRateLimited(account.provider, now: now) {
+            await finishOperation(account.provider); return
+        }
         var cache = state.usage[id] ?? .init(); cache.attemptedAt = now
         do {
             try await flushPendingCredentials(account.provider)
@@ -340,7 +376,9 @@ public final class AppModel {
             cache.error = error.localizedDescription
             if let typed = error as? AgentSwapError {
                 switch typed {
-                case .rateLimited(let retry): cache.retryAfter = retry; cache.retryReason = .serverRateLimit
+                case .rateLimited(let retry):
+                    retainProviderRateLimit(account.provider, retry: retry)
+                    cache.retryAfter = retry; cache.retryReason = .serverRateLimit
                 case .authentication:
                     cache.retryAfter = nil; cache.retryReason = nil
                     if let index = state.accounts.firstIndex(where: { $0.id == id }) { state.accounts[index].authenticationState = .needsLogin }
@@ -390,8 +428,13 @@ public final class AppModel {
     }
     private func importCurrentWithInteraction(_ provider: Provider) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, let adapter = adapters[provider] else { return }
+        if let reason = providerRateLimitBlockReason(provider) { message = reason; return }
         await operations.acquire(provider); beginOperation()
         guard !isPreparingForTermination else { await finishOperation(provider); return }
+        if let reason = providerRateLimitBlockReason(provider) {
+            message = reason
+            await finishOperation(provider); return
+        }
         do {
             try await flushPendingCredentials(provider)
             let imported = try await adapter.importCurrent()
@@ -399,7 +442,13 @@ public final class AppModel {
             state.activeAccounts[provider] = id
             message = "현재 \(provider.title) 계정을 가져왔습니다."
             await persist()
-        } catch { message = error.localizedDescription }
+        } catch {
+            if let error = error as? AgentSwapError, case .rateLimited(let retry) = error {
+                retainProviderRateLimit(provider, retry: retry)
+                await persist()
+            }
+            message = error.localizedDescription
+        }
         compatibility[provider] = await adapter.compatibility()
         await finishOperation(provider)
         await refreshDue(force: true)
@@ -418,6 +467,7 @@ public final class AppModel {
     }
     private func loginWithInteraction(_ provider: Provider, reauthenticationTarget: AccountRecord? = nil) async {
         guard storageHealthy, !isStarting, !isPreparingForTermination, !isLoggingIn, let adapter = adapters[provider] else { return }
+        if let reason = providerRateLimitBlockReason(provider) { message = reason; return }
         isLoggingIn = true; loggingInProvider = provider; reauthenticatingAccountID = reauthenticationTarget?.id
         let generation = UUID(); loginGeneration = generation
         canOpenLoginPage = false; isOpeningLoginPage = false
@@ -440,6 +490,9 @@ public final class AppModel {
             do {
                 try Task.checkCancellation()
                 guard !self.isPreparingForTermination else { throw CancellationError() }
+                if self.providerIsRateLimited(provider), let retry = self.providerRetryAfter(provider) {
+                    throw AgentSwapError.rateLimited(retry)
+                }
                 if let target = reauthenticationTarget { _ = try self.reauthenticationTarget(target) }
                 let imported = try await adapter.login()
                 let id: UUID
@@ -475,7 +528,13 @@ public final class AppModel {
                     }
                     await self.persist()
                 }
-            } catch { self.message = error.localizedDescription }
+            } catch {
+                if let error = error as? AgentSwapError, case .rateLimited(let retry) = error {
+                    self.retainProviderRateLimit(provider, retry: retry)
+                    await self.persist()
+                }
+                self.message = self.providerRateLimitBlockReason(provider) ?? error.localizedDescription
+            }
             pageMonitor.cancel()
             await pageMonitor.value
             self.compatibility[provider] = await adapter.compatibility()
@@ -635,6 +694,11 @@ public final class AppModel {
             if !queueAlreadyHeld { await finishOperation(account.provider) }
             return false
         }
+        if let reason = providerRateLimitBlockReason(account.provider) {
+            message = reason
+            if !queueAlreadyHeld { await finishOperation(account.provider) }
+            return false
+        }
         var applied = false
         do {
             try Task.checkCancellation()
@@ -676,6 +740,13 @@ public final class AppModel {
                 }
             }
             if account.provider == .claude {
+                // Preserve typed profile throttles before activation converts failures
+                // into a user-facing switch result, and persist any newly verified proof.
+                let verified = try await adapter.verifyCredential(credential, account: account)
+                if verified != credential {
+                    try await secrets.save(verified, accountID: id)
+                    credential = verified
+                }
                 try await verifyClaudeSessionSwitchBoundary(source: current?.account, target: account, desktopPreparation: desktopPreparation)
                 try validateClaudeSwitchState(account)
             }
@@ -709,7 +780,13 @@ public final class AppModel {
             case .failed(let text): attentionProviders.insert(account.provider); message = text
             }
             await persist()
-        } catch { message = error.localizedDescription }
+        } catch {
+            if let error = error as? AgentSwapError, case .rateLimited(let retry) = error {
+                retainProviderRateLimit(account.provider, retry: retry)
+                await persist()
+            }
+            message = error.localizedDescription
+        }
         if !queueAlreadyHeld { await finishOperation(account.provider) }
         return applied
     }
@@ -743,7 +820,12 @@ public final class AppModel {
         await KeychainInteraction.$mode.withValue(.interactive) {
             guard storageHealthy, !isStarting, !isPreparingForTermination, let claudeDesktop,
                   let account = state.accounts.first(where: { $0.id == id && $0.provider == .claude }) else { return }
+            if let reason = providerRateLimitBlockReason(.claude) { message = reason; return }
             await operations.acquire(.claude); beginOperation()
+            if let reason = providerRateLimitBlockReason(.claude) {
+                message = reason
+                await finishOperation(.claude); return
+            }
             do {
                 try Task.checkCancellation()
                 guard storageHealthy, !isPreparingForTermination,
@@ -752,7 +834,13 @@ public final class AppModel {
                 try Task.checkCancellation()
                 try await claudeDesktop.captureCurrent(for: account)
                 message = "이 계정의 Desktop 로그인을 Keychain에 저장했습니다."
-            } catch { message = error.localizedDescription }
+            } catch {
+                if let error = error as? AgentSwapError, case .rateLimited(let retry) = error {
+                    retainProviderRateLimit(.claude, retry: retry)
+                    await persist()
+                }
+                message = error.localizedDescription
+            }
             await finishOperation(.claude)
         }
     }
@@ -762,7 +850,12 @@ public final class AppModel {
             guard storageHealthy, !isStarting, !isPreparingForTermination, let claudeDesktop,
                   let adapter = adapters[.claude],
                   let account = state.accounts.first(where: { $0.id == id && $0.provider == .claude }) else { return }
+            if let reason = providerRateLimitBlockReason(.claude) { message = reason; return }
             await operations.acquire(.claude); beginOperation()
+            if let reason = providerRateLimitBlockReason(.claude) {
+                message = reason
+                await finishOperation(.claude); return
+            }
             var preparation: UUID?
             var needsAbort = false
             var cliApplied = false
@@ -790,6 +883,10 @@ public final class AppModel {
                 claudeDesktopRecoveryRequired = false
                 message = cliApplied ? "CLI와 Desktop 전환을 적용했습니다. \(detail)" : "\(cliMessage ?? "CLI 전환을 완료하지 못했습니다.") \(detail)"
             } catch {
+                if let error = error as? AgentSwapError, case .rateLimited(let retry) = error {
+                    retainProviderRateLimit(.claude, retry: retry)
+                    await persist()
+                }
                 var detail = error.localizedDescription
                 if needsAbort, let preparation {
                     do { _ = try await claudeDesktop.finish(transactionID: preparation, cliApplied: false) }
@@ -865,7 +962,7 @@ public final class AppModel {
         }
     }
     private func evaluateAutomaticSwitch(_ provider: Provider, now: Date) async {
-        guard pendingSwitch[provider] == nil else { return }
+        guard pendingSwitch[provider] == nil, !providerIsRateLimited(provider, now: now) else { return }
         if let active = state.activeAccounts[provider], state.requiresExplicitCredentialApplication?.contains(active) == true { return }
         var eligibleState = state
         for index in eligibleState.accounts.indices where state.requiresExplicitCredentialApplication?.contains(eligibleState.accounts[index].id) == true {

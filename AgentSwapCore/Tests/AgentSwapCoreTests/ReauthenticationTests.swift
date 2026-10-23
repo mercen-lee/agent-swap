@@ -273,9 +273,24 @@ struct ReauthenticationTests {
         #expect(fence < saved && saved < usage)
     }
 
-    @Test("Reauthentication clears only local retry timers and preserves a server 429 delay", arguments: [UsageRetryReason.localFailure, .serverRateLimit, .transientFailure])
+    @Test("Reauthentication waits for server cooldowns and completed logins clear only local retry timers", arguments: [UsageRetryReason.localFailure, .serverRateLimit, .transientFailure])
     func retryPolicyIsPreserved(_ reason: UsageRetryReason) async throws {
         let f = try await ReauthTestFixture.make(retry: reason)
+        if reason == .serverRateLimit {
+            let saveCount = await f.store.attempts
+            await f.model.reauthenticateAccount(f.old.account.id)
+            #expect(await f.adapter.loginCount == 0)
+            #expect(!f.model.isLoggingIn && f.model.reauthenticatingAccountID == nil)
+            #expect(f.model.message?.contains("서버 요청 제한") == true)
+            #expect(f.model.state == f.baseline)
+            #expect(await f.vault.peek(f.old.account.id) == f.old.credential)
+            #expect(await f.store.attempts == saveCount)
+            #expect(await f.adapter.importCount == 0)
+            #expect(await f.adapter.refreshCount == 0)
+            #expect(await f.adapter.activationCount == 0)
+            #expect(await f.adapter.usageTokens.isEmpty)
+            return
+        }
         try await begin(f)
         try await finish(f, expectsUsage: reason == .localFailure)
         let saved = try #require(await f.store.savedStates.first { $0.accounts.first?.authenticationState == .valid && $0.requiresExplicitCredentialApplication?.contains(f.old.account.id) == true })

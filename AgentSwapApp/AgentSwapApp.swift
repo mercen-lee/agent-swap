@@ -8,7 +8,8 @@ struct AgentSwapApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AgentSwapApp.isDemo
         ? AppModel.preview(claudeSessionIncompatible: AgentSwapApp.demoSessionIncompatible,
-                           claudeRecoveryConflict: AgentSwapApp.isDemo && CommandLine.arguments.contains("--demo-recovery-conflict"))
+                           claudeRecoveryConflict: AgentSwapApp.isDemo && CommandLine.arguments.contains("--demo-recovery-conflict"),
+                           rateLimited: CommandLine.arguments.contains("--demo-rate-limited"))
         : AppModel.live()
     @StateObject private var updater = AppUpdater(isDemo: AgentSwapApp.isDemo)
     @State private var isAuthorizingSavedAccounts = false

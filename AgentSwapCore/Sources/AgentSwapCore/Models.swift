@@ -137,6 +137,8 @@ public struct PersistedState: Codable, Equatable, Sendable {
     public var accountDisplayOrder: [UUID]? = nil
     public var activeAccounts: [Provider: UUID] = [:]
     public var usage: [UUID: UsageCache] = [:]
+    /// A provider throttle applies to every account, including after an application restart.
+    public var providerRetryAfter: [Provider: Date]? = nil
     public var lastSwitch: [Provider: Date] = [:]
     /// Non-secret before-image hashes keep a rotated grant from being overwritten by stale native auth.
     public var pendingNativeRefreshPredecessor: [UUID: String]? = nil

@@ -50,6 +50,10 @@ struct ProviderBrandIcon: View {
 }
 
 enum UsagePresentation {
+    static func rateLimitRetry(cache: UsageCache?, providerRetryAfter: Date?, now: Date = Date()) -> Date? {
+        let accountRetry = cache?.retryReason == .serverRateLimit ? cache?.retryAfter : nil
+        return [accountRetry, providerRetryAfter].compactMap { $0 }.filter { $0 > now }.max()
+    }
     static func percent(_ value: Double) -> String {
         value.formatted(.number.precision(.fractionLength(0...1))) + "%"
     }
@@ -71,6 +75,20 @@ enum UsagePresentation {
         case .needsLogin: "다시 로그인 필요"
         case .unsupported: "지원하지 않는 인증"
         }
+    }
+}
+
+struct UsageRateLimitNotice: View {
+    let retryAfter: Date
+
+    var body: some View {
+        Label {
+            Text("서버 조회 제한 · \(retryAfter, format: .dateTime.hour().minute()) 재시도")
+        } icon: {
+            Image(systemName: "clock")
+        }
+        .font(.caption).foregroundStyle(.orange)
+        .help("서버가 지정한 시각 이후 자동으로 다시 조회합니다. 저장된 인증과 마지막 정상 조회값을 유지합니다.")
     }
 }
 

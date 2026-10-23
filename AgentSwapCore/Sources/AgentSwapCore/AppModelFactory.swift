@@ -7,7 +7,8 @@ public extension AppModel {
     }
 
     /// In-memory, deterministic fixture mode. Never reads or writes provider authentication.
-    static func preview(claudeSessionIncompatible: Bool = false, claudeRecoveryConflict: Bool = false) -> AppModel {
+    static func preview(claudeSessionIncompatible: Bool = false, claudeRecoveryConflict: Bool = false,
+                        rateLimited: Bool = false) -> AppModel {
         let now = Date()
         var state = PersistedState()
         let claudePersonal = AccountRecord(identity: .init(provider: .claude, userID: "demo-claude-1", workspaceID: "personal"), nickname: "개인 계정", email: "personal@example.com", workspaceName: "개인 워크스페이스", plan: "Max", createdAt: now.addingTimeInterval(-300), automaticSwitchEligible: true)
@@ -27,6 +28,13 @@ public extension AppModel {
             codexTeam.id: .init(windows: [.init(id: "short", title: "5시간", usedPercent: 26, resetsAt: now.addingTimeInterval(16000)), .init(id: "long", title: "주간", usedPercent: 43, resetsAt: now.addingTimeInterval(300000))])
         ]
         state.usage = values.mapValues { .init(snapshot: $0, attemptedAt: now) }
+        if rateLimited {
+            let retry = now.addingTimeInterval(3600)
+            state.providerRetryAfter = [.claude: retry]
+            state.usage[claudePersonal.id]?.error = AgentSwapError.rateLimited(retry).localizedDescription
+            state.usage[claudePersonal.id]?.retryAfter = retry
+            state.usage[claudePersonal.id]?.retryReason = .serverRateLimit
+        }
         let credential = Credential(accessToken: "demo-only", expiresAt: now.addingTimeInterval(3600), rawAuth: Data())
         let credentials = Dictionary(uniqueKeysWithValues: state.accounts.map { ($0.id, credential) })
         let adapters = Provider.allCases.map { provider in
